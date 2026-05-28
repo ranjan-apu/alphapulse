@@ -363,7 +363,7 @@ def build_user_prompt(
 
     sections.append(f"---\n{market_state_text}")
     sections.append(f"---\n{mode_line}")
-    sections.append("Follow the Price-Action Workflow (A through H) and output your tool request or final signal.")
+    sections.append("Follow the Price-Action Workflow. Note: Your FIRST response MUST be a structured 'analysis_plan' JSON block, not a tool request or final signal. Define your HTF bias, gap classification, questions to resolve, and tools needed first.")
 
     return "\n\n".join(sections)
 

@@ -88,6 +88,29 @@ class TestContextWindowPolicy:
         # All candles should be <= T
         assert all(idx <= T for idx in result.index)
 
+    def test_historical_data_tool_excludes_current_daily_and_weekly_candles(self):
+        from core.tools import ToolHarness
+
+        T = IST.localize(datetime(2026, 5, 28, 14, 0))
+        df_5m = make_ohlcv_df("2026-05-28 09:15", 10, "15min")
+        daily_dates = pd.date_range("2026-05-24", "2026-05-28", freq="D", tz="Asia/Kolkata")
+        df_daily = pd.DataFrame(
+            {"open": 100, "high": 110, "low": 90, "close": 105, "volume": 1000},
+            index=daily_dates,
+        )
+        weekly_dates = pd.date_range("2026-05-04", "2026-05-25", freq="W-MON", tz="Asia/Kolkata")
+        df_weekly = pd.DataFrame(
+            {"open": 100, "high": 110, "low": 90, "close": 105, "volume": 1000},
+            index=weekly_dates,
+        )
+        harness = ToolHarness(df_5m, df_daily, df_weekly, T)
+
+        daily = harness._get_historical_data({"timeframe": "daily", "maxCandles": 10})
+        weekly = harness._get_historical_data({"timeframe": "weekly", "maxCandles": 10})
+
+        assert all(pd.Timestamp(candle["time"]).date() < T.date() for candle in daily["candles"])
+        assert all(pd.Timestamp(candle["time"]).date() < datetime(2026, 5, 25).date() for candle in weekly["candles"])
+
     def test_build_context_contract(self):
         from core.context_window import build_context_contract
 

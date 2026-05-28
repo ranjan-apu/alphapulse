@@ -100,6 +100,54 @@ class ToolHarness:
             "params": ["timeframe", "startDate", "endDate", "startDaysAgo", "endDaysAgo", "maxCandles"],
             "description": "Pull additional historical candles for a specific period, always capped at decision time T. Prefer ISO startDate/endDate; days-ago arguments are also accepted.",
         },
+        "get_portfolio_state": {
+            "params": [],
+            "description": "Get the current portfolio capital ledger (cash, deployed capital, realized/unrealized PnL, charges).",
+        },
+        "get_open_position": {
+            "params": [],
+            "description": "Get the currently active open position (if any) with its entry price, stop-loss, and target.",
+        },
+        "get_decision_history": {
+            "params": ["limit"],
+            "description": "Get the history of recent decisions and outcomes.",
+        },
+        "get_cooldown_state": {
+            "params": [],
+            "description": "Check if a cooldown or re-entry trade lock is currently active.",
+        },
+        "get_session_phase": {
+            "params": [],
+            "description": "Get the current market session phase (e.g. active trading, management only).",
+        },
+        "detect_market_structure": {
+            "params": ["lookback", "swing_strength"],
+            "description": "Detect market swings, Break of Structure (BOS), and Change of Character (CHOCH).",
+        },
+        "compute_session_vwap": {
+            "params": [],
+            "description": "Compute the intraday session VWAP and its slope.",
+        },
+        "compute_volume_profile": {
+            "params": [],
+            "description": "Compute the intraday session volume profile (POC, VAH, VAL, HVN/LVN).",
+        },
+        "detect_market_regime": {
+            "params": [],
+            "description": "Detect the current market regime (trend, range, volatile, compression) and session type.",
+        },
+        "score_confluence": {
+            "params": ["htf_bias", "structure_state", "vwap_relation", "location_quality", "trigger_quality", "volume_confirmation", "risk_quality"],
+            "description": "Score the overall quality and confluence of a candidate trade setup.",
+        },
+        "get_active_session_memory": {
+            "params": [],
+            "description": "Retrieve the current day's active session map, session levels, and recent events.",
+        },
+        "write_observation": {
+            "params": ["observation"],
+            "description": "Record a proposed price-action observation to the current session event log.",
+        },
     }
 
     def __init__(
@@ -108,11 +156,13 @@ class ToolHarness:
         df_daily: pd.DataFrame,
         df_weekly: pd.DataFrame,
         decision_time: datetime,
+        run_id: str = None,
     ):
         self.df_5m = df_5m
         self.df_daily = df_daily
         self.df_weekly = df_weekly
         self.decision_time = decision_time
+        self.run_id = run_id
         self.call_count = 0
         self.max_calls = config.MAX_TOOL_CALLS_PER_DECISION
 
@@ -197,6 +247,18 @@ class ToolHarness:
             "plot_volume_view": self._plot_volume_view,
             "plot_context_dashboard": self._plot_context_dashboard_tool,
             "get_historical_data": self._get_historical_data,
+            "get_portfolio_state": self._get_portfolio_state,
+            "get_open_position": self._get_open_position,
+            "get_decision_history": self._get_decision_history,
+            "get_cooldown_state": self._get_cooldown_state,
+            "get_session_phase": self._get_session_phase,
+            "detect_market_structure": self._detect_market_structure_tool,
+            "compute_session_vwap": self._compute_session_vwap_tool,
+            "compute_volume_profile": self._compute_volume_profile_tool,
+            "detect_market_regime": self._detect_market_regime_tool,
+            "score_confluence": self._score_confluence_tool,
+            "get_active_session_memory": self._get_active_session_memory,
+            "write_observation": self._write_observation,
         }
         handler = handlers[tool_name]
         return handler(args)
@@ -371,15 +433,7 @@ class ToolHarness:
 
     def _plot_market_view(self, args: Dict) -> Dict:
         timeframe = args.get("timeframe", config.DECISION_INTERVAL)
-        tf_map = {
-            "5m": self.df_5m,
-            "15m": self.df_5m,
-            "15min": self.df_5m,
-            "intraday": self.df_5m,
-            "daily": self.df_daily,
-            "weekly": self.df_weekly,
-        }
-        df = tf_map.get(timeframe.lower(), self.df_5m)
+        df = self._get_data_for_timeframe(timeframe)
 
         if timeframe.lower() == "daily":
             path = plot_daily_context_chart(df, self.decision_time)
@@ -398,7 +452,10 @@ class ToolHarness:
 
     def _plot_context_dashboard_tool(self, args: Dict) -> Dict:
         path = plot_context_dashboard(
-            self.df_5m, self.df_daily, self.df_weekly, self.decision_time
+            self._get_data_for_timeframe(config.DECISION_INTERVAL),
+            self._get_data_for_timeframe("daily"),
+            self._get_data_for_timeframe("weekly"),
+            self.decision_time
         )
         return {"chart_type": "context_dashboard", "chart_path": str(path) if path else None}
 
@@ -420,9 +477,9 @@ class ToolHarness:
             from data.collector import resample_to_timeframe
             df_source = resample_to_timeframe(self.df_5m[self.df_5m.index <= self.decision_time], timeframe)
         elif tf_lower in ("daily", "1d", "day", "d", "macro"):
-            df_source = self.df_daily
+            df_source = self._get_data_for_timeframe("daily")
         elif tf_lower in ("weekly", "1w", "week", "w", "htf"):
-            df_source = self.df_weekly
+            df_source = self._get_data_for_timeframe("weekly")
         else:
             df_source = self.df_daily
 
@@ -508,6 +565,160 @@ class ToolHarness:
             end_ts = min(end_ts, decision_ts)
 
         return start_ts, end_ts
+
+    def _get_portfolio_state(self, args: Dict) -> Dict:
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        from db.services import ReplayStateService
+        snap = ReplayStateService.get_latest_portfolio_snapshot(self.run_id)
+        return {"portfolio_state": snap}
+
+    def _get_open_position(self, args: Dict) -> Dict:
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        from db.services import ReplayStateService
+        pos = ReplayStateService.get_active_position(self.run_id, config.SYMBOL)
+        return {"open_position": pos}
+
+    def _get_decision_history(self, args: Dict) -> Dict:
+        limit = int(args.get("limit", 10))
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        with UnitOfWork() as uow:
+            history = uow.decisions.get_decision_history(self.run_id, config.SYMBOL, limit=limit)
+        return {"decision_history": history}
+
+    def _get_cooldown_state(self, args: Dict) -> Dict:
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        from db.services import ReplayStateService
+        locks = ReplayStateService.get_cooldown_locks(self.run_id, config.SYMBOL, self.decision_time)
+        return {"cooldown_active": len(locks) > 0, "active_locks": locks}
+
+    def _get_session_phase(self, args: Dict) -> Dict:
+        from db.services import ReplayStateService
+        phase = ReplayStateService.get_session_phase(self.decision_time)
+        from core.session_controller import MarketSessionController
+        controller = MarketSessionController()
+        summary = controller.get_session_summary(self.decision_time)
+        return {"session_phase": phase.value, "session_summary": summary}
+
+    def _detect_market_structure_tool(self, args: Dict) -> Dict:
+        df = self._get_data_for_timeframe(config.DECISION_INTERVAL)
+        lookback = int(args.get("lookback", 20))
+        swing_strength = int(args.get("swing_strength", 2))
+        from core.market_structure import detect_market_structure, structure_to_dict
+        struct = detect_market_structure(df, lookback=lookback, swing_strength=swing_strength)
+        return structure_to_dict(struct)
+
+    def _compute_session_vwap_tool(self, args: Dict) -> Dict:
+        df = self._get_data_for_timeframe(config.DECISION_INTERVAL)
+        today_data = df[df.index.date == self.decision_time.date()]
+        current_price = float(df["close"].iloc[-1])
+        from core.summarizer import compute_atr
+        atr_series = compute_atr(self.df_daily)
+        prior_days = self.df_daily[self.df_daily.index.date < self.decision_time.date()]
+        atr = float(atr_series.loc[prior_days.index[-1]]) if not prior_days.empty and prior_days.index[-1] in atr_series.index else current_price * 0.005
+        
+        from core.vwap import compute_session_vwap, vwap_result_to_dict
+        vwap_res = compute_session_vwap(today_data, current_price, atr=atr)
+        return vwap_result_to_dict(vwap_res)
+
+    def _compute_volume_profile_tool(self, args: Dict) -> Dict:
+        df = self._get_data_for_timeframe(config.DECISION_INTERVAL)
+        today_data = df[df.index.date == self.decision_time.date()]
+        current_price = float(df["close"].iloc[-1])
+        from core.volume_profile import compute_volume_profile, volume_profile_to_dict
+        vp_res = compute_volume_profile(today_data, current_price)
+        return volume_profile_to_dict(vp_res)
+
+    def _detect_market_regime_tool(self, args: Dict) -> Dict:
+        df = self._get_data_for_timeframe(config.DECISION_INTERVAL)
+        today_data = df[df.index.date == self.decision_time.date()]
+        current_price = float(df["close"].iloc[-1])
+        from core.summarizer import compute_atr
+        atr_series = compute_atr(self.df_daily)
+        prior_days = self.df_daily[self.df_daily.index.date < self.decision_time.date()]
+        atr = float(atr_series.loc[prior_days.index[-1]]) if not prior_days.empty and prior_days.index[-1] in atr_series.index else current_price * 0.005
+        
+        from core.regime import detect_market_regime, regime_result_to_dict
+        regime_res = detect_market_regime(today_data, atr=atr)
+        return regime_result_to_dict(regime_res)
+
+    def _score_confluence_tool(self, args: Dict) -> Dict:
+        htf_bias = args.get("htf_bias", "neutral")
+        structure_state = args.get("structure_state", "unclear")
+        vwap_relation = args.get("vwap_relation", "at_vwap")
+        location_quality = int(args.get("location_quality", 0))
+        trigger_quality = int(args.get("trigger_quality", 0))
+        volume_confirmation = int(args.get("volume_confirmation", 0))
+        risk_quality = int(args.get("risk_quality", 0))
+        
+        from core.confluence import score_confluence
+        score = score_confluence(
+            htf_bias=htf_bias,
+            structure_state=structure_state,
+            vwap_relation=vwap_relation,
+            location_quality=location_quality,
+            trigger_quality=trigger_quality,
+            volume_confirmation=volume_confirmation,
+            risk_quality=risk_quality
+        )
+        return {
+            "total_score": score.total,
+            "normalized_score": score.normalized,
+            "is_tradable": score.is_tradable,
+            "htf_alignment": score.htf_alignment,
+            "structure_quality": score.structure_quality,
+            "volume_quality": score.volume_quality,
+            "risk_quality": score.risk_quality,
+            "level_quality": score.level_quality
+        }
+
+    def _get_active_session_memory(self, args: Dict) -> Dict:
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        session_date = self.decision_time.date()
+        session_id = f"sess_{self.run_id}_{session_date.strftime('%Y%m%d')}"
+        with UnitOfWork() as uow:
+            session_map = uow.sessions.get_session_map(session_id)
+            if not session_map:
+                return {"error": f"No active session found for date {session_date}"}
+            levels = uow.sessions.get_active_levels(session_id)
+            events = uow.sessions.get_events_for_session(session_id)
+        return {
+            "session_map": session_map,
+            "active_levels": levels,
+            "recent_events": events[-10:]
+        }
+
+    def _write_observation(self, args: Dict) -> Dict:
+        observation = args.get("observation")
+        if not observation:
+            return {"error": "observation is required"}
+        if not isinstance(observation, str):
+            return {"error": "observation must be a string"}
+        observation = observation.strip()
+        if not observation:
+            return {"error": "observation cannot be blank"}
+        if len(observation) > 1000:
+            return {"error": "observation must be 1000 characters or fewer"}
+        if not self.run_id:
+            return {"error": "No run_id provided to ToolHarness"}
+        session_date = self.decision_time.date()
+        session_id = f"sess_{self.run_id}_{session_date.strftime('%Y%m%d')}"
+        import uuid
+        event_id = f"evt_obs_{uuid.uuid4().hex[:8]}"
+        with UnitOfWork() as uow:
+            uow.sessions.save_event({
+                "event_id": event_id,
+                "session_id": session_id,
+                "run_id": self.run_id,
+                "event_time": self.decision_time,
+                "event_type": "OBSERVATION",
+                "event_data": {"observation": observation}
+            })
+        return {"success": True, "event_id": event_id, "observation": observation}
 
     @classmethod
     def get_tool_descriptions(cls) -> str:

@@ -112,7 +112,7 @@ class Config:
 
     # Agent
     DECISION_MODE: str = os.getenv("DECISION_MODE", "exploratory").strip().lower()
-    MAX_TOOL_CALLS_PER_DECISION: int = 3
+    MAX_TOOL_CALLS_PER_DECISION: int = int(os.getenv("MAX_TOOL_CALLS_PER_DECISION", "8"))
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 2000
 
@@ -133,6 +133,19 @@ class Config:
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
     REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+
+    # Postgres & Replay Defaults
+    STATE_BACKEND: str = os.getenv("STATE_BACKEND", "postgres")
+    AGENT_WORKFLOW: str = os.getenv("AGENT_WORKFLOW", "direct")
+    PRODUCT_TYPE: str = os.getenv("PRODUCT_TYPE", "CNC")
+    INSTRUMENT_TYPE: str = os.getenv("INSTRUMENT_TYPE", "equity_cash")
+    STARTING_CAPITAL: float = float(os.getenv("STARTING_CAPITAL", "100000.0"))
+    MAX_CAPITAL_PER_TRADE: float = float(os.getenv("MAX_CAPITAL_PER_TRADE", "30000.0"))
+    RISK_BUDGET_PCT: float = float(os.getenv("RISK_BUDGET_PCT", "0.01"))
+    MAX_DAILY_LOSS: float = float(os.getenv("MAX_DAILY_LOSS", "3000.0"))
+    MAX_TRADES_PER_DAY: int = int(os.getenv("MAX_TRADES_PER_DAY", "5"))
+    JSONL_AUDIT_ENABLED: bool = os.getenv("JSONL_AUDIT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+
 
     @classmethod
     def ensure_dirs(cls):
