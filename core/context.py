@@ -5,7 +5,7 @@ at each decision point T. Strictly filters all data to <= T.
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from config import config
 from core.summarizer import (
@@ -138,9 +138,8 @@ def build_market_state_package(
     location = price_location(micro) if len(micro) >= 10 else "no_clear_area"
 
     # ---- Recent 5m candles (raw, for trigger context) ----
-    recent_5m = micro.iloc[-20:].copy()
     recent_candles = []
-    for idx, row in recent_5m.iterrows():
+    for idx, row in micro.iterrows():
         recent_candles.append({
             "time": str(idx),
             "open": float(row["open"]),
@@ -152,7 +151,7 @@ def build_market_state_package(
 
     # ---- Daily candle summaries ----
     daily_summaries = []
-    for idx, row in macro.iloc[-10:].iterrows():
+    for idx, row in macro.iterrows():
         daily_summaries.append({
             "date": str(idx.date()),
             "open": float(row["open"]),
@@ -216,7 +215,11 @@ def build_market_state_package(
     return package
 
 
-def format_market_state_for_prompt(package: Dict[str, Any]) -> str:
+def format_market_state_for_prompt(
+    package: Dict[str, Any],
+    include_candles: bool = True,
+    full_history: bool = False,
+) -> str:
     """
     Format the MarketStatePackage as a compact text prompt for the LLM.
     """
@@ -314,30 +317,34 @@ def format_market_state_for_prompt(package: Dict[str, Any]) -> str:
         if sw.get("most_recent_low"):
             lines.append(f"  Most Recent Swing Low: {sw['most_recent_low']}")
 
-    # Recent intraday candles (show last 8 as raw data)
-    recent = package.get("recent_intraday_candles") or package["recent_5m_candles"]
-    if recent:
-        lines.append(f"\nLAST 8 {timeframe_label} CANDLES (most recent first):")
-        lines.append(f"  {'Time':<30s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Volume':>10s}")
-        for c in reversed(recent[-8:]):
-            t_short = c["time"].split(" ")[-1] if " " in c["time"] else c["time"][-8:]
-            lines.append(f"  {t_short:<30s} {c['open']:>8.2f} {c['high']:>8.2f} {c['low']:>8.2f} {c['close']:>8.2f} {c['volume']:>10d}")
+    if include_candles:
+        # Recent intraday candles (show last 8 or all as raw data)
+        recent = package.get("recent_intraday_candles") or package["recent_5m_candles"]
+        if recent:
+            limit = len(recent) if full_history else 8
+            lines.append(f"\nLAST {limit} {timeframe_label} CANDLES (most recent first):")
+            lines.append(f"  {'Time':<30s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Volume':>10s}")
+            for c in reversed(recent[-limit:]):
+                t_short = c["time"].split(" ")[-1] if " " in c["time"] else c["time"][-8:]
+                lines.append(f"  {t_short:<30s} {c['open']:>8.2f} {c['high']:>8.2f} {c['low']:>8.2f} {c['close']:>8.2f} {c['volume']:>10d}")
 
-    # Daily summaries (last 5)
-    daily = package["daily_summaries"]
-    if daily:
-        lines.append(f"\nLAST 5 DAILY CANDLES:")
-        lines.append(f"  {'Date':<12s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Range':>8s}")
-        for d in daily[-5:]:
-            lines.append(f"  {d['date']:<12s} {d['open']:>8.2f} {d['high']:>8.2f} {d['low']:>8.2f} {d['close']:>8.2f} {d['range']:>8.2f}")
+        # Daily summaries (last 5 or all)
+        daily = package["daily_summaries"]
+        if daily:
+            limit = len(daily) if full_history else 5
+            lines.append(f"\nLAST {limit} DAILY CANDLES:")
+            lines.append(f"  {'Date':<12s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Range':>8s}")
+            for d in daily[-limit:]:
+                lines.append(f"  {d['date']:<12s} {d['open']:>8.2f} {d['high']:>8.2f} {d['low']:>8.2f} {d['close']:>8.2f} {d['range']:>8.2f}")
 
-    # Weekly summaries (last 3)
-    weekly = package["weekly_summaries"]
-    if weekly:
-        lines.append(f"\nLAST 3 WEEKLY CANDLES:")
-        lines.append(f"  {'Week':<12s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Range':>8s}")
-        for w in weekly[-3:]:
-            lines.append(f"  {w['week']:<12s} {w['open']:>8.2f} {w['high']:>8.2f} {w['low']:>8.2f} {w['close']:>8.2f} {w['range']:>8.2f}")
+        # Weekly summaries (last 3 or all)
+        weekly = package["weekly_summaries"]
+        if weekly:
+            limit = len(weekly) if full_history else 3
+            lines.append(f"\nLAST {limit} WEEKLY CANDLES:")
+            lines.append(f"  {'Week':<12s} {'Open':>8s} {'High':>8s} {'Low':>8s} {'Close':>8s} {'Range':>8s}")
+            for w in weekly[-limit:]:
+                lines.append(f"  {w['week']:<12s} {w['open']:>8.2f} {w['high']:>8.2f} {w['low']:>8.2f} {w['close']:>8.2f} {w['range']:>8.2f}")
 
     # Visual context pack
     chart_paths = package.get("chart_paths") or {}
@@ -362,5 +369,35 @@ def format_market_state_for_prompt(package: Dict[str, Any]) -> str:
     lines.append("DECISION REQUIRED: Based on DART framework (Direction, Area, Risk, Trigger).")
     lines.append("Output BUY, SELL, or HOLD with structured reasoning.")
     lines.append("=" * 60)
+
+    return "\n".join(lines)
+
+
+def format_incremental_candles(
+    new_weekly: List[Dict[str, Any]],
+    new_daily: List[Dict[str, Any]],
+    new_intraday: List[Dict[str, Any]],
+) -> str:
+    """
+    Format newly completed candles into a compact representation for incremental updates.
+    """
+    lines = []
+    lines.append("### INCREMENTAL MARKET UPDATE")
+
+    if new_weekly:
+        lines.append("\nNewly Completed Weekly Candles:")
+        for w in new_weekly:
+            lines.append(f"  Week: {w['week']} | O={w['open']:.2f} H={w['high']:.2f} L={w['low']:.2f} C={w['close']:.2f} V={w['volume']} Range={w['range']:.2f}")
+
+    if new_daily:
+        lines.append("\nNewly Completed Daily Candles:")
+        for d in new_daily:
+            lines.append(f"  Date: {d['date']} | O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f} V={d['volume']} Range={d['range']:.2f}")
+
+    if new_intraday:
+        lines.append("\nNewly Completed Intraday (15min) Candles:")
+        for c in new_intraday:
+            t_short = c["time"].split(" ")[-1] if " " in c["time"] else c["time"]
+            lines.append(f"  Time: {t_short} | O={c['open']:.2f} H={c['high']:.2f} L={c['low']:.2f} C={c['close']:.2f} V={c['volume']}")
 
     return "\n".join(lines)
