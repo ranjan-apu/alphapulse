@@ -83,6 +83,81 @@ class DartAgent:
         self.model = config.MODEL_NAME
         self.max_tool_calls = config.MAX_TOOL_CALLS_PER_DECISION
         self.langfuse = langfuse_tracer
+        # Stateful conversation and timestamp tracking
+        self.conversation_history = []
+        self.last_weekly_time = None
+        self.last_daily_time = None
+        self.last_intraday_time = None
+        self.last_session_date = None
+
+    def reset_session(self) -> None:
+        """Clear conversation history and tracking timestamps."""
+        self.conversation_history = []
+        self.last_weekly_time = None
+        self.last_daily_time = None
+        self.last_intraday_time = None
+
+    def _get_new_candles(self, package: Dict[str, Any]) -> tuple:
+        """
+        Compare package candle timestamps against tracking variables.
+        Returns (new_weekly, new_daily, new_intraday).
+        """
+        new_weekly = []
+        new_daily = []
+        new_intraday = []
+
+        # Weekly
+        for w in package.get("weekly_summaries", []):
+            w_time = w["week"]
+            if self.last_weekly_time is None or w_time > self.last_weekly_time:
+                new_weekly.append(w)
+
+        # Daily
+        for d in package.get("daily_summaries", []):
+            d_time = d["date"]
+            if self.last_daily_time is None or d_time > self.last_daily_time:
+                new_daily.append(d)
+
+        # Intraday
+        for c in package.get("recent_intraday_candles", []):
+            c_time = c["time"]
+            if self.last_intraday_time is None or c_time > self.last_intraday_time:
+                new_intraday.append(c)
+
+        return new_weekly, new_daily, new_intraday
+
+    def _build_step_user_prompt(
+        self,
+        transient_market_state_text: str,
+        portfolio_summary: str = "",
+        session_summary: str = "",
+        memory_summary: str = "",
+    ) -> str:
+        """Build the compact step prompt for subsequent steps of a session."""
+        mode_line = (
+            "Decision mode is STRICT: choose BUY only when the validated setup is fully complete. Otherwise SKIP (if flat) or HOLD (if in position)."
+            if config.DECISION_MODE == "strict"
+            else "Decision mode is EXPLORATORY: look for a testable BUY candidate, use tools when appropriate, and let the validator reject weak trades."
+        )
+
+        sections = [
+            f"### STEP DECISION POINT at {config.SYMBOL}",
+        ]
+
+        if portfolio_summary:
+            sections.append(f"---\nPORTFOLIO & POSITION STATE:\n{portfolio_summary}")
+
+        if session_summary:
+            sections.append(f"---\nSESSION STATE:\n{session_summary}")
+
+        if memory_summary:
+            sections.append(f"---\nRELEVANT MEMORIES:\n{memory_summary}")
+
+        sections.append(f"---\n{transient_market_state_text}")
+        sections.append(f"---\n{mode_line}")
+        sections.append("Follow the Price-Action Workflow. Note: Your FIRST response MUST be a structured 'analysis_plan' JSON block, not a tool request or final signal. Define your HTF bias, gap classification, questions to resolve, and tools needed first.")
+
+        return "\n\n".join(sections)
 
     def decide(
         self,
@@ -101,6 +176,12 @@ class DartAgent:
         """
         run_id = harness.run_id
         T = harness.decision_time
+
+        # 1. Reset check at day/session boundary
+        if T:
+            if self.last_session_date is None or T.date() != self.last_session_date:
+                self.reset_session()
+                self.last_session_date = T.date()
 
         portfolio_summary = ""
         session_summary = ""
@@ -183,24 +264,70 @@ class DartAgent:
                         mem_lines.append(f"  - Lesson: {refl.get('lesson')} (confidence: {refl.get('confidence')})")
                 memory_summary = "\n".join(mem_lines)
 
-        tool_descriptions = ToolHarness.get_tool_descriptions()
-        initial_user_text = build_user_prompt(
-            market_state_text,
-            tool_descriptions,
+        # 2. Build conversation history state (Case A or Case B)
+        is_first_prompt = len(self.conversation_history) == 0
+
+        if is_first_prompt:
+            # 2a. Prepend System Prompt
+            self.conversation_history.append({"role": "system", "content": build_system_prompt()})
+            
+            # 2b. Format all 13 weekly, 22 daily, and 75 intraday candles from the current package
+            from core.context import format_market_state_for_prompt
+            market_state_text_full = format_market_state_for_prompt(market_state_package, include_candles=True, full_history=True)
+            
+            tool_descriptions = ToolHarness.get_tool_descriptions()
+            initial_user_text = build_user_prompt(
+                market_state_text_full,
+                tool_descriptions,
+                portfolio_summary=portfolio_summary,
+                session_summary=session_summary,
+                memory_summary=memory_summary,
+            )
+            
+            initial_user_content = self._build_initial_user_content(initial_user_text, market_state_package)
+            self.conversation_history.append({"role": "user", "content": initial_user_content})
+            
+            # Initialize tracking timestamps
+            weekly = market_state_package.get("weekly_summaries", [])
+            if weekly:
+                self.last_weekly_time = weekly[-1]["week"]
+            daily = market_state_package.get("daily_summaries", [])
+            if daily:
+                self.last_daily_time = daily[-1]["date"]
+            intraday = market_state_package.get("recent_intraday_candles", [])
+            if intraday:
+                self.last_intraday_time = intraday[-1]["time"]
+        else:
+            # 2c. Subsequent step - check for new candles
+            new_weekly, new_daily, new_intraday = self._get_new_candles(market_state_package)
+            if new_weekly or new_daily or new_intraday:
+                from core.context import format_incremental_candles
+                incremental_text = format_incremental_candles(new_weekly, new_daily, new_intraday)
+                self.conversation_history.append({"role": "user", "content": incremental_text})
+                
+                # Update tracking timestamps
+                if new_weekly:
+                    self.last_weekly_time = new_weekly[-1]["week"]
+                if new_daily:
+                    self.last_daily_time = new_daily[-1]["date"]
+                if new_intraday:
+                    self.last_intraday_time = new_intraday[-1]["time"]
+
+        # 3. Build the step-specific prompt for this decision point (without candle tables)
+        from core.context import format_market_state_for_prompt
+        transient_market_state_text = format_market_state_for_prompt(market_state_package, include_candles=False)
+        
+        step_user_text = self._build_step_user_prompt(
+            transient_market_state_text,
             portfolio_summary=portfolio_summary,
             session_summary=session_summary,
             memory_summary=memory_summary,
         )
-        messages = [
-            {"role": "system", "content": build_system_prompt()},
-            {
-                "role": "user",
-                "content": self._build_initial_user_content(
-                    initial_user_text,
-                    market_state_package,
-                ),
-            },
-        ]
+        step_user_content = self._build_initial_user_content(step_user_text, market_state_package)
+        
+        # 4. Construct messages history (temporarily appending step prompt to a copy)
+        messages = list(self.conversation_history)
+        messages.append({"role": "user", "content": step_user_content})
 
         raw_responses = []
         tool_log = []
