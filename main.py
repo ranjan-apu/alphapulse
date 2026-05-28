@@ -6,6 +6,7 @@ import sys
 import json
 import time
 from datetime import datetime
+import pandas as pd
 
 from config import config
 from data.collector import collect_all_data, load_cached_data, cache_is_fresh, resample_to_timeframe
@@ -13,7 +14,8 @@ from core.clock import WalkForwardClock
 from core.context import build_market_state_package, format_market_state_for_prompt
 from core.tools import ToolHarness
 from core.charts import generate_all_charts
-from core.position import PositionTracker
+from db.services import RunBootstrapService, ReplayStateService, DecisionTransactionService, OutcomeFeedbackService
+from core.session_controller import MarketSessionController
 from agent.dart import DartAgent
 from validation.validator import validate_signal
 from journal.signal import SignalJournal
@@ -132,8 +134,28 @@ def run_replay(
     journal = SignalJournal()
     evaluator = FeedbackEvaluator(df_5m)
     tracer = create_tracer()
-    position = PositionTracker(redis_client)
-    position.reset()
+
+    # Initialize Postgres Run & Snapshot Set
+    run_id = f"run_{config.SYMBOL}_{int(datetime.now().timestamp())}"
+    RunBootstrapService.create_or_resume_run(
+        run_id=run_id,
+        symbol=config.SYMBOL,
+        starting_capital=config.STARTING_CAPITAL,
+        max_capital_per_trade=config.MAX_CAPITAL_PER_TRADE,
+        risk_budget_pct=config.RISK_BUDGET_PCT,
+        max_daily_loss=config.MAX_DAILY_LOSS,
+        max_trades_per_day=config.MAX_TRADES_PER_DAY,
+        notes="Replay walk-forward run",
+        start_date=df_5m.index.min().date(),
+        end_date=df_5m.index.max().date(),
+    )
+    RunBootstrapService.create_snapshot_set(
+        symbol=config.SYMBOL,
+        df_weekly=df_weekly,
+        df_daily=df_daily,
+        df_15m=df_5m,
+        run_id=run_id,
+    )
 
     total_steps = clock.total_steps()
     if replay_date:
@@ -155,6 +177,7 @@ def run_replay(
     # ---- REPLAY LOOP ----
     step_count = 0
     start_time = time.time()
+    decision_ids = {}
 
     print(f"\n{'─' * 60}")
     print("  STARTING REPLAY")
@@ -168,17 +191,82 @@ def run_replay(
         if replay_date and T.date() != replay_date:
             continue
 
-        if not position.should_evaluate(T):
+        # Initialize session map and levels if needed, then update for this candle
+        from db.services import SessionStateService
+        SessionStateService.init_session_if_needed(run_id, config.SYMBOL, T, df_daily, df_5m)
+        SessionStateService.process_candle_update(run_id, config.SYMBOL, T, decision_point["data_up_to_T"], df_daily)
+
+        if not ReplayStateService.should_evaluate(run_id, config.SYMBOL, T):
             continue
+
+        # Check for stop loss/target hits / forced exit
+        active_pos = ReplayStateService.get_active_position(run_id, config.SYMBOL)
+        if active_pos:
+            # Check stop / target hits
+            candle_T = decision_point["candle_T"]
+            low = float(candle_T["low"])
+            high = float(candle_T["high"])
+            stop = active_pos["stop"]
+            target = active_pos["target"]
+            direction = active_pos["direction"]
+
+            stop_hit = False
+            target_hit = False
+            
+            if direction == "BUY":
+                if low <= stop:
+                    stop_hit = True
+                if high >= target:
+                    target_hit = True
+            else:  # SELL
+                if high >= stop:
+                    stop_hit = True
+                if low <= target:
+                    target_hit = True
+
+            # If both hit in same candle, stop hit is conservative
+            if stop_hit and target_hit:
+                stop_hit = True
+                target_hit = False
+
+            # Check forced squareoff
+            controller = MarketSessionController()
+            is_squareoff_time = T.time() >= controller.config.force_squareoff_time
+            
+            if stop_hit or target_hit or is_squareoff_time:
+                # We exit deterministically
+                exit_signal = {
+                    "action": "EXIT",
+                    "position_id": active_pos["position_id"],
+                    "exit_reason": "stop_hit" if stop_hit else ("target_hit" if target_hit else "forced_squareoff"),
+                    "suggested_exit_price": stop if stop_hit else (target if target_hit else float(candle_T["close"])),
+                    "reason": f"Deterministic exit: stop_hit={stop_hit}, target_hit={target_hit}, forced_squareoff={is_squareoff_time}"
+                }
+                exit_validation = {
+                    "action": "EXIT",
+                    "is_valid": True,
+                    "stop_hit": stop_hit,
+                    "target_hit": target_hit,
+                    "forced_exit": is_squareoff_time and not stop_hit and not target_hit
+                }
+                dec_data, dec_id = DecisionTransactionService.process_decision(
+                    run_id=run_id,
+                    symbol=config.SYMBOL,
+                    T=T,
+                    current_price=float(candle_T["close"]),
+                    signal=exit_signal,
+                    validation_result=exit_validation
+                )
+                decision_ids[str(T) + "_exit"] = dec_id
+                print(f" [EXITED via {exit_signal['exit_reason']}]", end="", flush=True)
+                active_pos = None
 
         if max_steps and step_count >= max_steps:
             print(f"\n  Reached max steps limit ({max_steps}). Stopping.")
             break
         step_count += 1
 
-        position.record_evaluation(T)
-        position.increment_signal_count()
-        has_pos = position.has_position()
+        has_pos = active_pos is not None
 
         # Progress
         print(f"\n[{step_count}/{max_steps or total_steps}] {T} "
@@ -231,14 +319,14 @@ def run_replay(
         market_state_text = format_market_state_for_prompt(package)
 
         # ---- Initialize Tool Harness ----
-        harness = ToolHarness(df_5m, df_daily, df_weekly, T)
+        harness = ToolHarness(df_5m, df_daily, df_weekly, T, run_id=run_id)
 
         # ---- Run DART Agent ----
         try:
             agent_result = agent.decide(package, market_state_text, harness)
         except Exception as e:
             print(f"\n  [Agent error: {e}]")
-            current_position = position.get_position() or {}
+            current_position = active_pos or {}
             agent_result = {
                 "raw_responses": [str(e)],
                 "tool_calls": [],
@@ -267,7 +355,7 @@ def run_replay(
 
         signal = agent_result.get("final_signal", {})
         if has_pos and signal.get("action") in ("HOLD", "EXIT") and not signal.get("position_id"):
-            current_position = position.get_position() or {}
+            current_position = active_pos or {}
             signal["position_id"] = current_position.get("position_id") or "open_position"
 
         # ---- Update charts with signal levels ----
@@ -287,22 +375,30 @@ def run_replay(
                 pass  # Keep initial charts
 
         # ---- Validate Signal ----
-        validation_result = validate_signal(signal, T, session_end, has_open_position=has_pos)
+        validation_result = validate_signal(
+            signal,
+            T,
+            session_end,
+            has_open_position=has_pos,
+            tool_calls=agent_result.get("tool_calls", [])
+        )
 
-        # ---- Auto-open position if valid BUY/SELL ----
+        # ---- Process Decision in Postgres ----
+        dec_data, dec_id = DecisionTransactionService.process_decision(
+            run_id=run_id,
+            symbol=config.SYMBOL,
+            T=T,
+            current_price=float(decision_point['candle_T']['close']),
+            signal=signal,
+            validation_result=validation_result
+        )
+        decision_ids[str(T)] = dec_id
+
         is_valid = validation_result.get("is_valid", False)
         final_action = validation_result.get("action", signal.get("action", "HOLD"))
         sizing = validation_result.get("sizing", {})
 
         if is_valid and final_action in ("BUY", "SELL") and not has_pos:
-            position.open_position(
-                entry_price=float(sizing["entry"]),
-                direction=final_action,
-                stop=float(sizing["stop"]),
-                target=float(sizing["target"]),
-                quantity=int(sizing["quantity"]),
-                entry_time=str(T),
-            )
             print(f" [OPEN {final_action} qty={sizing['quantity']}]", end="", flush=True)
 
         if validation_result.get("rejection_reason"):
@@ -403,16 +499,35 @@ def run_replay(
     print(f"  Elapsed: {elapsed:.1f}s ({elapsed/step_count:.1f}s per step)" if step_count > 0 else "")
 
     # ---- Close any remaining position ----
-    pos_summary = position.summary()
-    print(f"  Position state: {'OPEN' if pos_summary['has_position'] else 'CLOSED'}")
-    if pos_summary['has_position']:
+    active_pos = ReplayStateService.get_active_position(run_id, config.SYMBOL)
+    print(f"  Position state: {'OPEN' if active_pos else 'CLOSED'}")
+    if active_pos:
         square_off_df = df_5m
         if replay_date:
             square_off_df = df_5m[df_5m.index.date == replay_date]
         last_price = float(square_off_df["close"].iloc[-1])
-        position.close_position(last_price, "replay_end_square_off")
+        
+        exit_signal = {
+            "action": "EXIT",
+            "position_id": active_pos["position_id"],
+            "exit_reason": "replay_end_square_off",
+            "suggested_exit_price": last_price,
+            "reason": "Deterministic forced square-off at replay end"
+        }
+        exit_validation = {
+            "action": "EXIT",
+            "is_valid": True,
+            "forced_exit": True
+        }
+        DecisionTransactionService.process_decision(
+            run_id=run_id,
+            symbol=config.SYMBOL,
+            T=df_5m.index[-1],
+            current_price=last_price,
+            signal=exit_signal,
+            validation_result=exit_validation
+        )
         print(f"  Forced square-off at replay end @ {last_price:.2f}")
-    print(f"  Signals evaluated (LLM calls): {pos_summary['signal_count']}")
 
     # ---- Flush Langfuse ----
     tracer.flush()
@@ -443,6 +558,55 @@ def run_replay(
     print(f"\n  Evaluation Metrics:")
     for k, v in metrics.items():
         print(f"    {k}: {v}")
+
+    # Persist evaluation outcomes to Postgres
+    for eval_res in eval_results:
+        t_str = eval_res["decision_time"]
+        dec_id = None
+        eval_dt = pd.Timestamp(t_str)
+        action = eval_res.get("action")
+        
+        if action == "EXIT":
+            for k, d_id in decision_ids.items():
+                if k.endswith("_exit") and pd.Timestamp(k[:-5]) == eval_dt:
+                    dec_id = d_id
+                    break
+        
+        if not dec_id:
+            for k, d_id in decision_ids.items():
+                if not k.endswith("_exit") and pd.Timestamp(k) == eval_dt:
+                    dec_id = d_id
+                    break
+        
+        if dec_id:
+            outcome_label = "ambiguous"
+            outcome = eval_res.get("outcome")
+            if outcome == "target_hit" or outcome == "target_first":
+                outcome_label = "win"
+            elif outcome == "stop_hit" or outcome == "stop_first":
+                outcome_label = "loss"
+            elif outcome == "square_off_at_close":
+                net_pnl = eval_res.get("net_pnl", 0)
+                outcome_label = "win" if net_pnl > 0 else ("loss" if net_pnl < 0 else "scratch")
+            elif outcome == "no_trade":
+                outcome_label = "no_trade"
+            
+            setup_tags = []
+            action = eval_res.get("action")
+            if action in ("BUY", "SELL"):
+                setup_tags.append(action)
+            hold_qual = eval_res.get("hold_quality")
+            if hold_qual:
+                setup_tags.append(hold_qual)
+
+            OutcomeFeedbackService.record_feedback(
+                decision_id=dec_id,
+                outcome_label=outcome_label,
+                net_r=eval_res.get("net_r_multiple", 0.0) or eval_res.get("r_multiple", 0.0) or 0.0,
+                mfe_pct=eval_res.get("max_favorable_excursion_pct", 0.0) or 0.0,
+                mae_pct=eval_res.get("max_adverse_excursion_pct", 0.0) or 0.0,
+                setup_tags=setup_tags
+            )
 
     eval_path = evaluator.save_results()
     print(f"\n  Evaluation results: {eval_path}")

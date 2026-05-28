@@ -4,7 +4,7 @@ Trade validator for the agent harness.
 Enforces the plan's state-aware action vocabulary, session constraints,
 risk-based sizing capped by capital ceiling, and post-charge reward:risk.
 """
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from config import config
@@ -59,6 +59,7 @@ class TradeValidator:
         decision_time: datetime,
         session_end: datetime,
         has_open_position: bool = False,
+        tool_calls: List[Dict] = None,
     ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
         Validate an agent signal.
@@ -70,6 +71,39 @@ class TradeValidator:
 
         if action not in ("BUY", "SELL", "SKIP", "HOLD", "EXIT"):
             return False, "REJECTED_SCHEMA", None
+
+        # ---- Required tool policy checks ----
+        if tool_calls is not None:
+            called_tools = {tc.get("tool") for tc in tool_calls}
+            if action == "BUY":
+                required = {
+                    "get_portfolio_state",
+                    "get_session_phase",
+                    "compute_session_vwap",
+                    "detect_market_structure",
+                    "score_confluence",
+                    "calculate_trade_math"
+                }
+                missing = required - called_tools
+                if missing:
+                    return False, "REJECTED_SCHEMA", {
+                        "error": f"Missing required tool calls: {list(missing)}"
+                    }
+                
+                # Breakout tag check
+                checklist = signal.get("checklist", {})
+                market_regime = str(checklist.get("market_regime", "")).lower()
+                structure_state = str(checklist.get("structure_state", "")).lower()
+                if "breakout" in market_regime or "breakout" in structure_state or "bos" in structure_state:
+                    if "compute_volume_profile" not in called_tools:
+                        return False, "REJECTED_SCHEMA", {
+                            "error": "Breakout trades require compute_volume_profile"
+                        }
+            elif action in ("HOLD", "EXIT"):
+                if "get_open_position" not in called_tools:
+                    return False, "REJECTED_SCHEMA", {
+                        "error": "HOLD/EXIT requires get_open_position tool"
+                    }
 
         # ---- State/action semantics ----
         if has_open_position:
@@ -225,6 +259,7 @@ def validate_signal(
     decision_time: datetime,
     session_end: datetime,
     has_open_position: bool = False,
+    tool_calls: List[Dict] = None,
 ) -> Dict:
     """
     Convenience function: validate and return enriched signal record.
@@ -235,6 +270,7 @@ def validate_signal(
         decision_time,
         session_end,
         has_open_position=has_open_position,
+        tool_calls=tool_calls,
     )
 
     result = {

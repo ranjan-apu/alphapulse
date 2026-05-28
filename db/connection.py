@@ -36,15 +36,15 @@ def get_connection_pool() -> psycopg2.pool.ThreadedConnectionPool:
 
 @contextmanager
 def get_connection():
-    """Get a connection from the pool. Use as context manager."""
+    """Get a pooled connection.
+
+    Transaction boundaries are owned by callers such as UnitOfWork. This
+    context manager only borrows and returns the connection.
+    """
     pool = get_connection_pool()
     conn = pool.getconn()
     try:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         pool.putconn(conn)
 

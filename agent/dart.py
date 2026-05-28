@@ -20,6 +20,7 @@ from agent.prompts import (
     TOOL_RESULT_PROMPT,
     FINAL_REMINDER,
 )
+from agent.schema import AnalysisPlan
 
 
 def _extract_json(text: str) -> Optional[Dict]:
@@ -98,8 +99,98 @@ class DartAgent:
           - tool_calls: list of tool requests and results
           - final_signal: parsed final decision
         """
+        run_id = harness.run_id
+        T = harness.decision_time
+
+        portfolio_summary = ""
+        session_summary = ""
+        memory_summary = ""
+
+        has_open_position = False
+        if run_id and T:
+            # Let's import ReplayStateService and UnitOfWork dynamically to avoid circular imports
+            from db.services import ReplayStateService
+            from db.unit_of_work import UnitOfWork
+            
+            # Fetch latest portfolio snapshot
+            port_snap = ReplayStateService.get_latest_portfolio_snapshot(run_id)
+            active_pos = ReplayStateService.get_active_position(run_id, config.SYMBOL)
+            has_open_position = bool(active_pos)
+            
+            if port_snap:
+                portfolio_summary = (
+                    f"- Cash available: ₹{port_snap['cash_available']:,.2f}\n"
+                    f"- Capital deployed: ₹{port_snap['capital_deployed']:,.2f}\n"
+                )
+                if active_pos:
+                    portfolio_summary += (
+                        f"- Open position: {active_pos['direction']} {active_pos['symbol']}, "
+                        f"qty={active_pos['quantity']}, entry=₹{active_pos['executed_entry']:.2f}, "
+                        f"stop=₹{active_pos['stop']:.2f}, target=₹{active_pos['target']:.2f}\n"
+                        f"- Unrealized P&L: ₹{active_pos.get('unrealized_pnl', 0.0):,.2f}\n"
+                    )
+                else:
+                    portfolio_summary += "- Open position: NONE\n"
+                portfolio_summary += (
+                    f"- Realized P&L today: ₹{port_snap['realized_pnl']:,.2f}\n"
+                    f"- Charges paid today: ₹{port_snap['charges_paid']:,.2f}\n"
+                    f"- Trades today: {port_snap['trades_taken_today']} / {port_snap['max_trades_per_day']}\n"
+                    f"- Daily loss used: ₹{port_snap['daily_loss_used']:,.2f} / ₹{port_snap['max_daily_loss']:,.2f}"
+                )
+            
+            # Fetch session map
+            session_date = T.date()
+            session_id = f"sess_{run_id}_{session_date.strftime('%Y%m%d')}"
+            with UnitOfWork() as uow:
+                sess_map = uow.sessions.get_session_map(session_id)
+                if sess_map:
+                    opening_range_high = sess_map.get('opening_range_high')
+                    opening_range_low = sess_map.get('opening_range_low')
+                    session_high = sess_map.get('session_high')
+                    session_low = sess_map.get('session_low')
+                    session_vwap = sess_map.get('session_vwap')
+                    vwap_slope = sess_map.get('vwap_slope')
+                    
+                    or_high_str = f"₹{opening_range_high:.2f}" if opening_range_high else "None"
+                    or_low_str = f"₹{opening_range_low:.2f}" if opening_range_low else "None"
+                    high_str = f"₹{session_high:.2f}" if session_high else "None"
+                    low_str = f"₹{session_low:.2f}" if session_low else "None"
+                    vwap_str = f"₹{session_vwap:.2f}" if session_vwap else "None"
+                    slope_str = f"{vwap_slope:.6f}" if vwap_slope else "0.0"
+
+                    session_summary = (
+                        f"- Phase: {ReplayStateService.get_session_phase(T).value}\n"
+                        f"- Opening range: High={or_high_str}, Low={or_low_str}\n"
+                        f"- Session High/Low: High={high_str}, Low={low_str}\n"
+                        f"- VWAP: {vwap_str}, Slope={slope_str}\n"
+                        f"- Gap classification: {sess_map.get('gap_classification')}\n"
+                        f"- Market regime: {sess_map.get('market_regime')}\n"
+                        f"- Current bias: {sess_map.get('current_bias')}"
+                    )
+                
+                # Fetch memory
+                episodes = uow.memory.get_episodes(config.SYMBOL, limit=3)
+                reflections = uow.memory.get_reflections(config.SYMBOL, limit=3)
+                
+                mem_lines = []
+                if episodes:
+                    mem_lines.append("Recent Episodes:")
+                    for ep in episodes:
+                        mem_lines.append(f"  - Setup: {ep.get('setup_tags')}, Action: {ep.get('action')}, Outcome: {ep.get('outcome_label')} ({ep.get('outcome_net_r')}R)")
+                if reflections:
+                    mem_lines.append("Reflections/Lessons:")
+                    for refl in reflections:
+                        mem_lines.append(f"  - Lesson: {refl.get('lesson')} (confidence: {refl.get('confidence')})")
+                memory_summary = "\n".join(mem_lines)
+
         tool_descriptions = ToolHarness.get_tool_descriptions()
-        initial_user_text = build_user_prompt(market_state_text, tool_descriptions)
+        initial_user_text = build_user_prompt(
+            market_state_text,
+            tool_descriptions,
+            portfolio_summary=portfolio_summary,
+            session_summary=session_summary,
+            memory_summary=memory_summary,
+        )
         messages = [
             {"role": "system", "content": build_system_prompt()},
             {
@@ -115,27 +206,63 @@ class DartAgent:
         tool_log = []
         final_signal = None
 
-        for round_num in range(self.max_tool_calls + 1):  # +1 for final
+        # Enforce planned agent workflow: round 0 is AnalysisPlan
+        for round_num in range(self.max_tool_calls + 2):  # +2 to account for AnalysisPlan round
             response = self._call_llm(messages)
             raw_responses.append(response)
 
             if response is None:
-                final_signal = self._fallback_hold("LLM returned empty response")
+                final_signal = self._fallback_signal("LLM returned empty response", has_open_position)
                 break
 
             parsed = _extract_json(response)
             if parsed is None:
-                final_signal = self._fallback_hold(f"Could not parse LLM response as JSON: {response[:200]}")
+                final_signal = self._fallback_signal(f"Could not parse LLM response as JSON: {response[:200]}", has_open_position)
                 break
 
             msg_type = parsed.get("type", "")
+
+            # Enforce analysis plan in round 0
+            if round_num == 0:
+                if msg_type != "analysis_plan":
+                    messages.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": "Please start by outputting a structured 'analysis_plan' first, following the Price-Action Workflow."
+                    })
+                    continue
+                else:
+                    try:
+                        AnalysisPlan.model_validate(parsed)
+                    except Exception as exc:
+                        messages.append({
+                            "role": "assistant",
+                            "content": response
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": f"Your analysis_plan failed schema validation: {exc}. Output a valid analysis_plan JSON object before requesting tools."
+                        })
+                        continue
+                    messages.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": "Plan accepted. Now retrieve memories/lessons if needed, execute your required tools in sequence, and synthesize your final signal when ready."
+                    })
+                    continue
 
             if msg_type == "final_signal":
                 final_signal = parsed
                 break
 
             elif msg_type == "tool_request":
-                if round_num >= self.max_tool_calls:
+                if round_num >= self.max_tool_calls + 1:
                     # Force final decision
                     messages.append({"role": "user", "content": FINAL_REMINDER})
                     continue
@@ -147,7 +274,7 @@ class DartAgent:
                 # Execute tool
                 tool_result = harness.execute(tool_name, tool_args)
                 tool_log.append({
-                    "round": round_num + 1,
+                    "round": round_num,
                     "tool": tool_name,
                     "arguments": tool_args,
                     "reason": tool_reason,
@@ -181,11 +308,11 @@ class DartAgent:
                 continue
 
         if final_signal is None:
-            final_signal = self._fallback_hold("Max rounds reached without final signal")
+            final_signal = self._fallback_signal("Max rounds reached without final signal", has_open_position)
 
         # Ensure action is present
-        if "action" not in final_signal or final_signal["action"] not in ("BUY", "SELL", "HOLD"):
-            final_signal["action"] = "HOLD"
+        if "action" not in final_signal or final_signal["action"] not in ("BUY", "SELL", "HOLD", "SKIP", "EXIT"):
+            final_signal["action"] = "HOLD" if has_open_position else "SKIP"
 
         return {
             "raw_responses": raw_responses,
@@ -253,11 +380,12 @@ class DartAgent:
             print(f"  [LLM Error] {e}")
             return None
 
-    def _fallback_hold(self, reason: str) -> Dict:
-        """Generate a fallback HOLD signal."""
+    def _fallback_signal(self, reason: str, has_open_position: bool) -> Dict:
+        """Generate a state-aware fallback signal."""
+        action = "HOLD" if has_open_position else "SKIP"
         return {
             "type": "final_signal",
-            "action": "HOLD",
+            "action": action,
             "confidence": 0.0,
             "dart": {
                 "direction": "unclear",
@@ -272,6 +400,6 @@ class DartAgent:
             "net_reward_risk_after_charges": None,
             "quantity": None,
             "deployed_capital": None,
-            "reason": f"Fallback HOLD: {reason}",
+            "reason": f"Fallback {action}: {reason}",
             "invalidation": None,
         }

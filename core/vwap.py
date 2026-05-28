@@ -80,7 +80,7 @@ def compute_session_vwap(
 
     # Standard deviation bands
     # Std of typical price deviations from VWAP
-    if len(vwap_series) >= 5:
+    if len(vwap_series) >= 5 and volume.sum() > 0:
         deviations = typical_price - vwap_series
         std_dev = float(np.sqrt((deviations ** 2 * volume).sum() / volume.sum()))
     else:
