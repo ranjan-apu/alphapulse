@@ -15,6 +15,15 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional
 
+import pytz
+
+IST = pytz.timezone("Asia/Kolkata")
+
+
+def _ist_now() -> datetime:
+    """Get current time in IST for consistency with session controller."""
+    return datetime.now(IST)
+
 
 class CooldownReason(str, Enum):
     AFTER_STOP_LOSS = "AFTER_STOP_LOSS"
@@ -55,7 +64,7 @@ class TradeLock:
     level_zone: Optional[str]
     reason: CooldownReason
     expires_at: datetime
-    created_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    created_at: datetime = field(default_factory=_ist_now)
 
 
 class CooldownController:
@@ -110,7 +119,7 @@ class CooldownController:
             direction=direction,
             level_zone=level_zone,
             reason=reason,
-            expires_at=datetime.now().astimezone() + timedelta(minutes=duration_minutes),
+            expires_at=_ist_now() + timedelta(minutes=duration_minutes),
         )
 
         self._locks.append(lock)
@@ -135,7 +144,7 @@ class CooldownController:
         # Clean expired locks
         self._cleanup_expired_locks()
 
-        now = datetime.now().astimezone()
+        now = _ist_now()
 
         # Check for active locks
         for lock in self._locks:
@@ -173,7 +182,7 @@ class CooldownController:
                 direction=direction,
                 level_zone=level_zone,
                 reason=CooldownReason.AFTER_STOP_LOSS,
-                expires_at=datetime.now().astimezone() + timedelta(
+                expires_at=_ist_now() + timedelta(
                     minutes=self.config.cooldown_after_stop_candles * self.config.decision_interval_minutes
                 ),
             )
@@ -193,7 +202,7 @@ class CooldownController:
                 direction=direction,
                 level_zone=None,
                 reason=CooldownReason.AFTER_TARGET_HIT,
-                expires_at=datetime.now().astimezone() + timedelta(
+                expires_at=_ist_now() + timedelta(
                     minutes=self.config.cooldown_after_target_candles * self.config.decision_interval_minutes
                 ),
             )
@@ -214,7 +223,7 @@ class CooldownController:
                 direction=None,
                 level_zone=None,
                 reason=CooldownReason.AFTER_REJECTED_SIGNAL,
-                expires_at=datetime.now().astimezone() + timedelta(
+                expires_at=_ist_now() + timedelta(
                     minutes=self.config.cooldown_after_rejection_candles * self.config.decision_interval_minutes
                 ),
             )
@@ -223,7 +232,7 @@ class CooldownController:
     def get_state(self) -> dict:
         """Get current cooldown state for the agent prompt."""
         self._cleanup_expired_locks()
-        now = datetime.now().astimezone()
+        now = _ist_now()
 
         active_locks = [l for l in self._locks if l.expires_at > now]
 
@@ -260,5 +269,5 @@ class CooldownController:
 
     def _cleanup_expired_locks(self):
         """Remove locks that have expired."""
-        now = datetime.now().astimezone()
+        now = _ist_now()
         self._locks = [l for l in self._locks if l.expires_at > now]

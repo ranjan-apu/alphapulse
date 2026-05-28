@@ -2,9 +2,8 @@
 Configurable slippage model for trade execution simulation.
 Applies adverse slippage to entry, exit, stop, and target prices.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
-import numpy as np
 
 
 @dataclass
@@ -31,6 +30,7 @@ class SlippageConfig:
     atr_multiplier_exit: float = 0.05
     atr_multiplier_stop: float = 0.1
     atr_multiplier_target: float = 0.05
+    atr_multiplier_force_squareoff: float = 0.05  # Previously hardcoded, now configurable
 
 
 def apply_entry_slippage(
@@ -52,7 +52,7 @@ def apply_entry_slippage(
     
     if direction.upper() == "BUY":
         return round(price + slippage_amount, 2)
-    else:  # SELL
+    else:
         return round(price - slippage_amount, 2)
 
 
@@ -75,7 +75,7 @@ def apply_exit_slippage(
     
     if direction.upper() == "BUY":
         return round(price - slippage_amount, 2)
-    else:  # SELL
+    else:
         return round(price + slippage_amount, 2)
 
 
@@ -88,8 +88,8 @@ def apply_stop_slippage(
     """
     Apply adverse slippage to a stop-loss price.
     
-    For BUY stop (sell to close): stop triggers lower than set (worse - more loss)
-    For SELL stop (buy to close): stop triggers higher than set (worse - more loss)
+    For BUY stop (sell to close): stop triggers lower (worse - more loss)
+    For SELL stop (buy to close): stop triggers higher (worse - more loss)
     """
     slippage_amount = _get_slippage_amount(
         config.mode, config.stop_slippage, config.stop_slippage_pct,
@@ -98,7 +98,7 @@ def apply_stop_slippage(
     
     if direction.upper() == "BUY":
         return round(stop_price - slippage_amount, 2)
-    else:  # SELL
+    else:
         return round(stop_price + slippage_amount, 2)
 
 
@@ -111,8 +111,8 @@ def apply_target_slippage(
     """
     Apply adverse slippage to a target price.
     
-    For BUY target (sell to close): target price achieved lower (worse)
-    For SELL target (buy to close): target price achieved higher (worse)
+    For BUY target (sell to close): target price lower (worse)
+    For SELL target (buy to close): target price higher (worse)
     """
     slippage_amount = _get_slippage_amount(
         config.mode, config.target_slippage, config.target_slippage_pct,
@@ -121,7 +121,7 @@ def apply_target_slippage(
     
     if direction.upper() == "BUY":
         return round(target_price - slippage_amount, 2)
-    else:  # SELL
+    else:
         return round(target_price + slippage_amount, 2)
 
 
@@ -135,7 +135,7 @@ def apply_force_squareoff_slippage(
     slippage_amount = _get_slippage_amount(
         config.mode, config.force_squareoff_slippage,
         config.force_squareoff_slippage_pct,
-        0.05, price, atr
+        config.atr_multiplier_force_squareoff, price, atr
     )
     
     if direction.upper() == "BUY":
@@ -157,7 +157,7 @@ def _get_slippage_amount(
         return price * pct_amount
     elif mode == "atr_based" and atr is not None:
         return atr * atr_mult
-    else:  # fixed_paise_per_share
+    else:
         return fixed_amount
 
 
@@ -171,14 +171,6 @@ def compute_executed_prices(
 ) -> dict:
     """
     Compute all executed prices after slippage.
-    
-    Returns dict with:
-    - entry_executed
-    - stop_executed
-    - target_executed
-    - slippage_entry_points
-    - slippage_stop_points
-    - slippage_target_points
     """
     if config is None:
         config = SlippageConfig()

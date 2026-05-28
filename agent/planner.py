@@ -272,8 +272,9 @@ class AgentPlanner:
 
         try:
             from datetime import datetime as dt
+            from core.regime import classify_time_bucket as _classify_tb
             ts = dt.fromisoformat(decision_time_str.replace("+05:30", ""))
-            return classify_time_bucket(ts)
+            return _classify_tb(ts)
         except Exception:
             return "unknown"
 
@@ -362,5 +363,4 @@ class AgentPlanner:
         stats["avg_net_r"] = stats["sum_net_r"] / stats["total_trades"]
 
 
-# Import at bottom to avoid circular import
-from core.regime import classify_time_bucket
+# classify_time_bucket is imported inside _classify_time_bucket method to avoid circular imports.

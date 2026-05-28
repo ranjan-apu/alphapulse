@@ -12,8 +12,8 @@ Resolution: risk-based sizing capped by capital ceiling.
 4. quantity = min(qty_risk, qty_capital)
 """
 import math
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -46,8 +46,8 @@ class SizingResult:
     capital_ceiling_hit: bool
     risk_budget_hit: bool
     actionable: bool
-    errors: list
-    warnings: list
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 def compute_position_size(

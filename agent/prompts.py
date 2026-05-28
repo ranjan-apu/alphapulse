@@ -271,7 +271,7 @@ You respond with either a tool request or a final signal.
 }
 ```
 
-For HOLD and EXIT, set trade fields (entry/stop/target/rewardRisk) to null. These fields are only populated for BUY/SELL signals.
+For HOLD and EXIT, set trade fields (entry/stop/target/gross_reward_risk/net_reward_risk) to null. These fields are only populated for BUY/SELL signals.
 """
 
 

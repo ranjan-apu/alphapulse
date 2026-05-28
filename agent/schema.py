@@ -156,9 +156,8 @@ class FinalSignal(BaseModel):
         elif action == "SKIP":
             if not self.reason:
                 raise ValueError("SKIP signal requires reason")
-            # checklist.reason_to_wait should be populated
             if not self.checklist.reason_to_wait:
-                pass  # soft check, not enforced
+                raise ValueError("SKIP signal requires checklist.reason_to_wait explaining why no trade")
 
         elif action == "HOLD":
             if self.position_id is None:

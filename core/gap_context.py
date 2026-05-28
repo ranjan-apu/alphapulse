@@ -65,8 +65,6 @@ def classify_gap(
     # Direction
     if abs(gap_pct) < 0.1:
         gap_direction = "flat_open"
-        gap_type = "no_gap"
-        gap_status = "no_gap"
     elif gap_points > 0:
         gap_direction = "gap_up"
     else:
@@ -100,8 +98,11 @@ def classify_gap(
         gap_direction, open_location, gap_atr_multiple, gap_pct
     )
 
-    # Gap status (initially unfilled)
-    gap_status = "unfilled"
+    # Gap status (initially unfilled if there's a gap, no_gap if flat)
+    if gap_direction == "flat_open":
+        gap_status = "no_gap"
+    else:
+        gap_status = "unfilled"
 
     return GapContext(
         prior_close=round(prior_close, 2),

@@ -227,6 +227,7 @@ class PortfolioStateManager:
         self._portfolio.realized_pnl += net_pnl
         self._portfolio.charges_paid += charges_exit
         self._portfolio.daily_loss_used += abs(min(net_pnl, 0))
+        self._portfolio.unrealized_pnl = 0.0
 
         self._position = None
         return result
