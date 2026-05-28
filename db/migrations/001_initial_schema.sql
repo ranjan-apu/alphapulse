@@ -1,6 +1,9 @@
 -- AlphaPulse initial schema
 -- All tables for portfolio, decisions, session memory, experiments, and data snapshots
 
+-- Enable pgvector extension for embedding-based memory retrieval (Plan Section 4.4.1)
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- ============================================================
 -- Stock metadata and corporate actions
 -- ============================================================

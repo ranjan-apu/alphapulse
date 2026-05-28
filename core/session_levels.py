@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
+import pytz
 
 
 class LevelState(str, Enum):
@@ -33,12 +34,11 @@ class SessionLevel:
     """A price level tracked during the session with lifecycle state."""
     level_id: str
     price: float
-    level_type: str  # 'support', 'resistance', 'vwap', 'poc', 'vah', 'val',
-                     # 'swing_high', 'swing_low', 'opening_range_high', 'opening_range_low'
+    level_type: str
     state: LevelState = LevelState.ACTIVE
     strength: int = 0
-    first_identified: datetime = field(default_factory=lambda: datetime.now().astimezone())
-    last_updated: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    first_identified: datetime = field(default_factory=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
+    last_updated: datetime = field(default_factory=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
 
 
 @dataclass
@@ -90,20 +90,12 @@ class LevelLifecycleManager:
 
     def process_candle(
         self,
-        candle: dict,  # {'open', 'high', 'low', 'close', 'volume'}
+        candle: dict,
         candle_time: datetime,
         levels: List[SessionLevel],
     ) -> List[SessionEvent]:
         """
         Process one candle against all active levels and return events.
-
-        Args:
-            candle: OHLCV dict for the completed candle
-            candle_time: Timestamp of the candle
-            levels: List of SessionLevel to check
-
-        Returns:
-            List of SessionEvent triggered by this candle
         """
         events = []
         high = candle["high"]
@@ -119,6 +111,10 @@ class LevelLifecycleManager:
 
             level_id = level.level_id
             price = level.price
+
+            # Initialize no-reaction counter for new/inactive levels
+            if level_id not in self._candles_since_test:
+                self._candles_since_test[level_id] = 0
 
             # Calculate distance from candle to level
             dist_high = abs(high - price)
@@ -262,8 +258,30 @@ class LevelLifecycleManager:
                             },
                         ))
 
+                # ---- BROKEN → REJECTED (failed break) ----
+                # If a break initially succeeded but price closes back on
+                # the original side, the break has failed.
+                break_threshold_fail = self.atr * 0.3 if self.atr > 0 else (price * 0.003)
+                if level.level_type in ("resistance", "swing_high"):
+                    if close < price - break_threshold_fail:
+                        level.state = LevelState.REJECTED
+                        level.last_updated = candle_time
+                        self._violation_count[level_id] = 0
+                elif level.level_type in ("support", "swing_low"):
+                    if close > price + break_threshold_fail:
+                        level.state = LevelState.REJECTED
+                        level.last_updated = candle_time
+                        self._violation_count[level_id] = 0
+
             # ---- INVALIDATED check (applies to any state) ----
             if level.state not in (LevelState.EXPIRED, LevelState.INVALIDATED):
+                # If candle is far from the level, increment no-reaction counter
+                if min_dist > atr_threshold:
+                    self._candles_since_test[level_id] = self._candles_since_test.get(level_id, 0) + 1
+                else:
+                    # Candle near the level: reset counter (level got attention)
+                    self._candles_since_test[level_id] = 0
+                
                 candles_no_reaction = self._candles_since_test.get(level_id, 0)
                 # Three consecutive candles with no reaction
                 if candles_no_reaction >= 3:

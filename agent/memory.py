@@ -247,7 +247,7 @@ class MemoryReflection:
             symbol=symbol,
             lesson=lesson,
             tags=tags,
-            source_episode_ids=source_episode_ids,
+            source_episode_ids=source_episode_ids,  # Use provided IDs, not generated dates
             direction=direction,
             reflection_level=reflection_level,
             confidence=confidence,

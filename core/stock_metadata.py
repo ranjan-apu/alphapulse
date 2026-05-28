@@ -75,8 +75,8 @@ class StockMetadataManager:
             metadata.lot_size = info.get("lotSize", 1)
 
             # Circuit limits (price bands)
-            metadata.circuit_limit_upper = info.get("priceHint")  # Approximation
-            metadata.circuit_limit_lower = info.get("priceHint")
+            metadata.circuit_limit_upper = info.get("priceBandUpper") or info.get("dayHigh")
+            metadata.circuit_limit_lower = info.get("priceBandLower") or info.get("dayLow")
 
             # Splits
             try:

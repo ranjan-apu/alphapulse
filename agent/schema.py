@@ -65,12 +65,13 @@ class PriceActionChecklist(BaseModel):
     session_type: Literal["trend_day", "range_day", "reversal_day", "inside_day", "opening_drive", "unclear"] = "unclear"
     structure_state: Literal["bullish_bos", "bearish_bos", "range_bound", "choch", "unclear"] = "unclear"
 
-    # Quality scores (0-5)
-    location_quality: int = Field(default=0, ge=0, le=5)
-    trigger_quality: int = Field(default=0, ge=0, le=5)
-    risk_quality: int = Field(default=0, ge=0, le=5)
+    # Quality scores (0-5) - aligned with Plan Section 8.1 scoring rubric
+    direction_score: int = Field(default=0, ge=0, le=5, description="HTF alignment with trade direction (Plan 8.1 D)")
+    location_quality: int = Field(default=0, ge=0, le=5, description="Area/zone quality (Plan 8.1 A)")
+    trigger_quality: int = Field(default=0, ge=0, le=5, description="Entry timing quality (Plan 8.1 T)")
+    risk_quality: int = Field(default=0, ge=0, le=5, description="Invalidation clarity (Plan 8.1 R)")
     volume_confirmation: int = Field(default=0, ge=0, le=5)
-    higher_tf_alignment: int = Field(default=0, ge=0, le=5)
+    confluence_score: int = Field(default=0, ge=0, le=5, description="Overall factor alignment")
 
     reason_to_wait: Optional[str] = None
 
@@ -184,7 +185,7 @@ class FinalSignal(BaseModel):
         """
         Check if the signal meets minimum scoring thresholds for a BUY/SELL.
 
-        For BUY/SELL:
+        Plan Section 8.1 Decision Rules:
         - Direction score >= 3
         - Area (location) score >= 4
         - Trigger score >= 3
@@ -195,7 +196,8 @@ class FinalSignal(BaseModel):
 
         checklist = self.checklist
         return (
-            checklist.location_quality >= 4
+            checklist.direction_score >= 3
+            and checklist.location_quality >= 4
             and checklist.trigger_quality >= 3
             and checklist.risk_quality >= 4
         )

@@ -29,8 +29,16 @@ class ContextWindowPolicy:
     require_complete_intraday_candles: bool = True
 
 
+def _get_cutoff(T: datetime, months: int) -> pd.Timestamp:
+    """Get a pandas Timestamp for the cutoff date, preserving timezone."""
+    ts = pd.Timestamp(T)
+    if T.tzinfo and ts.tzinfo is None:
+        ts = ts.tz_localize(T.tzinfo)
+    return ts - pd.DateOffset(months=months)
+
+
 def _ensure_tz(ts: datetime) -> datetime:
-    """Ensure timestamp has IST timezone."""
+    """Ensure timestamp has IST timezone for consistent comparisons."""
     if ts.tzinfo is None:
         return IST.localize(ts)
     return ts.astimezone(IST)
@@ -63,8 +71,8 @@ def get_completed_weekly_context(
     completed = df[df.index < pd.Timestamp(current_monday)]
     partial = df[df.index >= pd.Timestamp(current_monday)]
 
-    # Apply lookback
-    cutoff = pd.Timestamp(T) - pd.DateOffset(months=months)
+    # Apply lookback (preserves timezone)
+    cutoff = _get_cutoff(T, months)
     completed = completed[completed.index >= cutoff]
 
     return completed.copy(), partial.copy(), len(partial) > 0
@@ -93,8 +101,8 @@ def get_completed_daily_context(
     completed = df[completed_mask]
     partial = df[~completed_mask]
 
-    # Apply lookback
-    cutoff = pd.Timestamp(T) - pd.DateOffset(months=months)
+    # Apply lookback (preserves timezone)
+    cutoff = _get_cutoff(T, months)
     completed = completed[completed.index >= cutoff]
 
     return completed.copy(), partial.copy(), len(partial) > 0

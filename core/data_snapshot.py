@@ -194,8 +194,8 @@ class DataSnapshotManager:
         rows = []
         for idx, row in df_sorted.iterrows():
             rows.append(
-                f"{idx}|{row['open']:.6f}|{row['high']:.6f}|"
-                f"{row['low']:.6f}|{row['close']:.6f}|{row['volume']:.0f}"
+                f"{idx}|{row['open']:.12g}|{row['high']:.12g}|"
+                f"{row['low']:.12g}|{row['close']:.12g}|{row['volume']:.0f}"
             )
 
         canonical = "\n".join(rows)

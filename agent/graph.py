@@ -195,69 +195,143 @@ def _node_load_context(state: AgentState) -> AgentState:
 
 
 def _node_load_portfolio_state(state: AgentState) -> AgentState:
-    """Load portfolio and position state from Postgres/manager."""
-    # These should be populated by the harness before invoking the graph
+    """Load portfolio and position state."""
+    # Try to use PortfolioStateManager if available in state
+    psm = state.get("_portfolio_manager")
+    if psm:
+        portfolio = psm.get_portfolio_state()
+        state["portfolio_state"] = {
+            "cash_available": portfolio.cash_available,
+            "capital_deployed": portfolio.capital_deployed,
+            "realized_pnl": portfolio.realized_pnl,
+            "unrealized_pnl": portfolio.unrealized_pnl,
+            "charges_paid": portfolio.charges_paid,
+            "trades_taken_today": portfolio.trades_taken_today,
+            "max_trades_per_day": portfolio.max_trades_per_day,
+            "daily_loss_used": portfolio.daily_loss_used,
+            "max_daily_loss": portfolio.max_daily_loss,
+            "can_trade": portfolio.can_trade()[0],
+        }
+        pos = psm.get_open_position()
+        if pos:
+            state["open_position"] = {
+                "position_id": pos.position_id,
+                "symbol": pos.symbol,
+                "direction": pos.direction,
+                "entry": pos.entry,
+                "executed_entry": pos.executed_entry,
+                "stop": pos.stop,
+                "target": pos.target,
+                "quantity": pos.quantity,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "r_multiple_live": pos.r_multiple_live,
+            }
+            state["has_position"] = True
+        else:
+            state["has_position"] = False
+        return state
+    
+    # Fallback to pre-loaded state
     portfolio = state.get("portfolio_state", {})
     if not portfolio:
         state["portfolio_state"] = {
-            "cash_available": 100000.0,
+            "cash_available": 0.0,
             "capital_deployed": 0.0,
             "has_position": False,
-            "message": "Portfolio state not loaded; using defaults",
+            "error": "Portfolio state not available",
         }
-
     state["has_position"] = state.get("open_position") is not None
     return state
 
 
 def _node_retrieve_memory(state: AgentState) -> AgentState:
-    """Retrieve relevant memories for the current decision."""
-    # Memory retrieval is handled by AgentPlanner before graph invocation
-    # Results are passed via state
-    memories = state.get("retrieved_memories", {})
-    memory_text = state.get("memory_context", "")
-
-    if not memories and not memory_text:
-        state["memory_context"] = ""
-
+    """Retrieve relevant memories using MemoryStore/AgentPlanner."""
+    planner = state.get("_planner")
+    memory_store = state.get("_memory_store")
+    analysis_plan = state.get("analysis_plan", {})
+    symbol = state.get("symbol", "")
+    
+    if planner and memory_store and analysis_plan:
+        try:
+            from agent.schema import AnalysisPlan
+            plan = AnalysisPlan(**analysis_plan) if isinstance(analysis_plan, dict) else analysis_plan
+            memories = planner.retrieve_context_memories(symbol, plan)
+            state["retrieved_memories"] = memories
+            state["memory_context"] = planner.format_memory_context(memories)
+            return state
+        except Exception as e:
+            state["memory_context"] = f"Memory retrieval failed: {e}"
+            return state
+    
+    # Fallback
+    state["memory_context"] = state.get("memory_context", "")
     return state
 
 
 def _node_plan_analysis(state: AgentState) -> AgentState:
-    """Create analysis plan from market state."""
-    # Analysis plan is created by AgentPlanner before graph invocation
+    """Create analysis plan using AgentPlanner."""
+    planner = state.get("_planner")
+    if planner:
+        try:
+            plan = planner.plan_analysis(
+                market_state=state.get("market_state_package", {}),
+                portfolio_state=state.get("portfolio_state", {}),
+                session_phase=state.get("session_phase", {}),
+                has_position=state.get("has_position", False),
+            )
+            state["analysis_plan"] = plan.model_dump()
+            return state
+        except Exception as e:
+            pass
+    
+    # Fallback
     plan = state.get("analysis_plan", {})
     if not plan:
         state["analysis_plan"] = {
             "direction_bias": "neutral",
             "setup_tags": [],
             "areas_of_interest": [],
-            "planned_tools": [],
-            "reason": "No analysis plan generated",
+            "planned_tools": ["get_portfolio_state"],
+            "reason": "Default plan",
         }
     return state
 
 
 def _node_execute_tools(state: AgentState) -> AgentState:
     """
-    Execute tool calls requested by the LLM.
-
-    Tool execution is handled by ToolHarness. The graph node coordinates
-    the request/response cycle.
+    Execute tool calls through ToolHarness.
+    
+    The LLM's tool requests arrive via state['tool_requests'].
+    Each request is dispatched to ToolHarness and results stored.
     """
-    tool_requests = state.get("tool_requests", [])
+    harness = state.get("_tool_harness")
+    pending_requests = state.get("tool_requests", [])
     tool_results = state.get("tool_results", [])
     tool_count = state.get("tool_call_count", 0)
     max_calls = state.get("max_tool_calls", 6)
-
-    # If we have pending tool requests, they would be executed here
-    # In practice, the harness handles tool execution outside the graph
-    # and feeds results back in
-
+    
+    if harness and pending_requests:
+        for req in pending_requests:
+            if tool_count >= max_calls:
+                break
+            tool_name = req.get("tool", "")
+            tool_args = req.get("arguments", {})
+            if tool_name:
+                result = harness.execute(tool_name, tool_args)
+                tool_results.append({
+                    "tool": tool_name,
+                    "arguments": tool_args,
+                    "result": result,
+                })
+                tool_count += 1
+        state["tool_results"] = tool_results
+        state["tool_call_count"] = tool_count
+        state["tool_requests"] = []  # Clear processed requests
+    
     if tool_count >= max_calls:
         state["should_continue_tools"] = False
     else:
-        state["should_continue_tools"] = len(tool_requests) > 0
+        state["should_continue_tools"] = len(state.get("tool_requests", [])) > 0
 
     return state
 
@@ -381,20 +455,43 @@ def _node_risk_check(state: AgentState) -> AgentState:
 
 
 def _node_persist_decision(state: AgentState) -> AgentState:
-    """Persist the decision to Postgres/journal."""
+    """Persist the decision via journal or Postgres."""
     import uuid
-
     state["decision_id"] = f"dec_{uuid.uuid4().hex[:12]}"
-
-    # In production, this writes to decisions table and portfolio_snapshots
-    # For now, the journal handles persistence
-
+    
+    journal = state.get("_journal")
+    if journal:
+        try:
+            journal.record(
+                decision_time=state.get("decision_time", ""),
+                market_state_package=state.get("market_state_package", {}),
+                agent_result={
+                    "raw_responses": [],
+                    "tool_calls": state.get("tool_results", []),
+                    "final_signal": state.get("validated_signal", {}),
+                },
+                validation_result={
+                    "is_valid": state.get("risk_check_passed", False),
+                    "rejection_reason": "; ".join(state.get("risk_check_errors", [])),
+                    "action": state.get("validated_signal", {}).get("action", "SKIP"),
+                },
+                chart_paths={},
+            )
+        except Exception:
+            pass
+    
     return state
 
 
 def _node_update_memory(state: AgentState) -> AgentState:
     """Update working/session memory with the current decision."""
-    # Memory updates are handled by MemoryStore after the decision is made
+    memory_store = state.get("_memory_store")
+    if memory_store and state.get("validated_signal"):
+        # Update working memory with tool outputs
+        if memory_store.working:
+            for tr in state.get("tool_results", []):
+                memory_store.working.add_tool_output(tr["tool"], tr["result"])
+    
     return state
 
 

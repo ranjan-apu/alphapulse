@@ -146,17 +146,7 @@ class CooldownController:
 
         now = _ist_now()
 
-        # Check for active locks
-        for lock in self._locks:
-            if lock.expires_at > now:
-                # Direction-specific lock
-                if lock.direction and lock.direction == direction:
-                    return False, f"Cooldown active: {lock.reason.value} for {direction}"
-                # General lock (no direction filter)
-                if lock.direction is None:
-                    return False, f"Cooldown active: {lock.reason.value}"
-
-        # Check level attempts
+        # Check level attempts FIRST (more specific than generic locks)
         if level_zone and self._level_attempts.get(level_zone, 0) >= self.config.max_attempts_per_level_per_day:
             return False, f"Max attempts ({self.config.max_attempts_per_level_per_day}) at level zone '{level_zone}'"
 
@@ -164,6 +154,16 @@ class CooldownController:
         losses_this_direction = self._same_direction_losses.get(direction, 0)
         if losses_this_direction >= self.config.max_same_direction_losses_per_day:
             return False, f"Max same-direction losses ({self.config.max_same_direction_losses_per_day}) for {direction}"
+
+        # Check for active locks (direction-specific first, then generic)
+        for lock in self._locks:
+            if lock.expires_at > now:
+                # Direction-specific lock: only blocks matching direction
+                if lock.direction is not None and lock.direction == direction:
+                    return False, f"Cooldown active: {lock.reason.value} for {direction}"
+                # Generic lock (direction=None) with no level_zone: blocks all
+                if lock.direction is None and lock.level_zone is None:
+                    return False, f"Cooldown active: {lock.reason.value}"
 
         return True, None
 

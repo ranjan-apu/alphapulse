@@ -83,12 +83,15 @@ class ReflectionWriter:
         # Deduplicate tags
         tags = list(set(tags))
 
-        # Create reflection
+        # Create reflection with proper episode ID
+        import uuid
+        episode_id = f"ep_{uuid.uuid4().hex[:12]}"
+        
         reflection = MemoryReflection.create(
             symbol=signal.get("symbol", ""),
             lesson=lesson,
             tags=tags,
-            source_episode_ids=[f"ep_{datetime.now().strftime('%Y%m%d%H%M%S')}"],
+            source_episode_ids=[episode_id],  # Use UUID, not date format
             direction=action if action in ("BUY", "SELL") else None,
             reflection_level=confidence_level,
             confidence=self._compute_confidence(outcome),

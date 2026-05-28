@@ -134,6 +134,7 @@ class TestStockMetadata:
     def test_adjustment_factor_with_split(self):
         from core.stock_metadata import StockMetadataManager
 
+        mgr = StockMetadataManager()
         splits = [{"date": "2025-01-01", "ratio": 2.0}]  # 2:1 split
         factor = mgr._compute_adjustment_factor(splits)
         assert factor == 2.0
@@ -141,6 +142,7 @@ class TestStockMetadata:
     def test_adjustment_factor_multiple_splits(self):
         from core.stock_metadata import StockMetadataManager
 
+        mgr = StockMetadataManager()
         splits = [
             {"date": "2024-01-01", "ratio": 2.0},
             {"date": "2025-01-01", "ratio": 5.0},

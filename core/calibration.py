@@ -258,7 +258,7 @@ class CalibrationTracker:
         bucket.sum_net_r += net_r
         bucket.sum_mfe += mfe
         bucket.sum_mae += mae
-        bucket.sum_gross_r += confidence
+        bucket.sum_gross_r += abs(net_r)  # Gross R is absolute value of net R in this context
 
         if is_win:
             bucket.wins += 1

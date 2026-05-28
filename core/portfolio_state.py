@@ -184,7 +184,7 @@ class PortfolioStateManager:
         )
 
         self._portfolio.capital_deployed += deployed
-        self._portfolio.cash_available -= deployed
+        self._portfolio.cash_available -= (deployed + charges_entry)  # Deduct charges too
         self._portfolio.charges_paid += charges_entry
         self._portfolio.trades_taken_today += 1
 
