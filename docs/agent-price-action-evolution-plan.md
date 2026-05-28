@@ -1,9 +1,9 @@
-# AlphaPulse Agent Evolution Plan — Price Action Trading Harness (Single Large-Cap Stock)
+# AlphaPulse Agent Evolution Plan - Price Action Trading Harness (Single Large-Cap Stock)
 
-> **Status**: Proposed plan  
-> **Branch**: `feature/agent-price-action-architecture`  
-> **Instrument**: Single Indian large-cap equity cash stock (e.g., RELIANCE, TCS, HDFC Bank, Infosys, ICICI Bank)  
-> **Scope**: Agent intelligence, context, tools, memory, feedback, and evaluation. Real-time data ingestion and broker execution are intentionally deferred.  
+> **Status**: Proposed plan
+> **Branch**: `feature/agent-price-action-architecture`
+> **Instrument**: Single Indian large-cap equity cash stock (e.g., RELIANCE, TCS, HDFC Bank, Infosys, ICICI Bank)
+> **Scope**: Agent intelligence, context, tools, memory, feedback, and evaluation. Real-time data ingestion and broker execution are intentionally deferred.
 > **Goal**: Turn the current isolated POC LLM decision loop into a coherent, feedback-aware, portfolio-aware price-action trading agent that can reason like a session trader.
 
 ---
@@ -334,7 +334,9 @@ memory_episodes
 memory_reflections
 calibration_stats
 experiment_runs
+data_snapshot_sets
 data_snapshots
+stock_metadata
 agent_checkpoints
 ```
 
@@ -558,18 +560,31 @@ First implementation may keep deterministic stop/target handling and add `EXIT` 
 ### State Machine
 
 ```text
-FLAT
+FLAT (CNC delivery)
+  ├── BUY accepted  ──▶ LONG_OPEN
+  └── SKIP          ──▶ FLAT
+
+LONG_OPEN
+  ├── HOLD          ──▶ position remains open
+  ├── EXIT          ──▶ FLAT
+  ├── stop hit      ──▶ FLAT
+  ├── target hit    ──▶ FLAT
+  └── session end   ──▶ FLAT
+
+FLAT (MIS intraday - future phase)
   ├── BUY accepted  ──▶ LONG_OPEN
   ├── SELL accepted ──▶ SHORT_OPEN
   └── SKIP          ──▶ FLAT
 
-LONG_OPEN / SHORT_OPEN
+SHORT_OPEN (future phase)
   ├── HOLD          ──▶ position remains open
   ├── EXIT          ──▶ FLAT
   ├── stop hit      ──▶ FLAT
   ├── target hit    ──▶ FLAT
   └── session end   ──▶ FLAT
 ```
+
+For the first CNC-only harness, only `FLAT (CNC delivery)` and `LONG_OPEN` are active.
 
 ---
 
@@ -742,7 +757,7 @@ class EquityCashCharges:
 
 @dataclass
 class EquityCashMISCharges:
-    """Intraday (MIS) charges — lower STT and stamp duty on sell/intraday."""
+    """Intraday (MIS) charges - lower STT and stamp duty on sell/intraday."""
     brokerage_per_order: float = 20.0
     stt_buy: float = 0.0                    # 0% on buy side (MIS)
     stt_sell: float = 0.00025               # 0.025% on sell side (MIS)
@@ -799,8 +814,8 @@ class SlippageConfig:
     mode: str = "fixed_paise_per_share"  # or "percentage" or "atr_based"
     entry_slippage: float = 0.50          # ₹0.50 per share adverse (entry)
     exit_slippage: float = 0.50           # ₹0.50 per share adverse (exit)
-    stop_slippage: float = 1.00           # ₹1.00 per share adverse (stop loss — wider)
-    target_slippage: float = 0.50         # ₹0.50 per share adverse (target — smaller)
+    stop_slippage: float = 1.00           # ₹1.00 per share adverse (stop loss - wider)
+    target_slippage: float = 0.50         # ₹0.50 per share adverse (target - smaller)
     force_squareoff_slippage: float = 0.75
 ```
 
@@ -824,30 +839,139 @@ The `orders_simulated` table stores both `requested_price` and `executed_price` 
 
 Experiment reproducibility requires knowing exactly which data was used.
 
-### 4.11.1 DataSnapshot
+### 4.11.1 Data Snapshot Sets
+
+Each experiment uses three timeframes - weekly, daily, and intraday. A single snapshot cannot track them. Instead, use a snapshot set:
+
+Table: `data_snapshot_sets`
+
+```text
+set_id          TEXT PRIMARY KEY
+symbol          TEXT NOT NULL
+source          TEXT NOT NULL    -- 'yahoo_finance', 'broker_backfill', etc.
+adjusted_for_splits     BOOLEAN
+adjusted_for_dividends  BOOLEAN
+notes           TEXT
+created_at      TIMESTAMPTZ NOT NULL
+```
 
 Table: `data_snapshots`
 
 ```text
 snapshot_id     TEXT PRIMARY KEY
-symbol          TEXT NOT NULL
-source          TEXT NOT NULL    -- 'yahoo_finance', 'broker_backfill', etc.
+set_id          TEXT NOT NULL REFERENCES data_snapshot_sets(set_id)
+timeframe       TEXT NOT NULL    -- 'weekly', 'daily', 'intraday_15min'
 period_start    DATE NOT NULL
 period_end      DATE NOT NULL
-timeframe       TEXT NOT NULL    -- '5m', '15m', 'daily', 'weekly'
 candle_count    INTEGER
 first_candle    TIMESTAMPTZ
 last_candle     TIMESTAMPTZ
 data_hash       TEXT NOT NULL    -- SHA-256 of sorted OHLCV rows
-adjusted_for_splits  BOOLEAN
-adjusted_for_dividends BOOLEAN
 yfinance_period TEXT
 created_at      TIMESTAMPTZ NOT NULL
 ```
 
+Every experiment run references a single `set_id`. All three snapshot hashes must match for the run to be reproducible. If any one timeframe is re-sourced or re-adjusted, the hash mismatch flags the comparison as invalid.
+
 Every experiment run references its data snapshot IDs. If raw data is ever re-sourced, re-adjusted, or the pipeline changes, the hash will differ and old experiment comparisons will flag as invalid rather than silently producing wrong conclusions.
 
 **Corporate actions rule:** For stocks, historical context (charting, indicators) should use adjusted close to show continuous price history. Trade execution uses raw unadjusted prices. The harness must store both adjusted and unadjusted DataFrames separately and never mix them.
+
+---
+
+## 4.12 Position Sizing: Risk-Based Floor + Capital Ceiling
+
+There is a subtle but critical conflict between two independent formulas that must be reconciled.
+
+**Formula 1 - Capital ceiling (from Section 1.1):**
+
+```text
+quantity = floor(max_capital_per_trade / entry_price)
+```
+
+With `max_capital_per_trade = ₹30,000` and a ₹2,400 stock, this gives 12 shares.
+
+**Formula 2 - Risk calculation (used by validator):**
+
+```text
+gross_risk = quantity * (entry_price - stop_price)
+```
+
+If the stop is ₹10 away (tight), gross_risk = ₹120. If the stop is ₹80 away (wide), gross_risk = ₹960 - same quantity, very different risk.
+
+These are independent and can conflict: capital-based sizing gives a fixed quantity, but risk-based sizing says "never risk more than ₹X per trade." A tight stop on capital-sized quantity leaves risk under-budget; a wide stop on capital-sized quantity blows past any reasonable risk-per-trade limit.
+
+**Resolution: risk-based sizing capped by capital ceiling.**
+
+1. First compute the risk-per-share:
+
+```text
+risk_per_share = abs(entry_price - stop_price)
+```
+
+2. Compute quantity from available risk budget (default: 1% of starting capital per trade):
+
+```text
+risk_budget = starting_capital * 0.01             # ₹1,000 on ₹1L account
+qty_risk    = floor(risk_budget / risk_per_share)
+```
+
+3. Apply capital ceiling:
+
+```text
+qty_capital = floor(max_capital_per_trade / entry_price)
+quantity    = min(qty_risk, qty_capital)
+```
+
+If `risk_per_share == 0` or `quantity <= 0`, the trade is rejected.
+
+**Validator must check both constraints:**
+
+```text
+deployed_capital = quantity * entry_price
+
+CHECK: deployed_capital <= max_capital_per_trade
+CHECK: gross_risk <= risk_budget
+CHECK: net_target_profit >= 2 * gross_risk
+```
+
+If any check fails, the trade is rejected. This prevents silent evaluation errors where a wide stop passes the R:R ratio but risks far more capital than intended. Both `risk_budget` and `max_capital_per_trade` are configurable per run.
+
+### 4.12.1 stock_metadata Table
+
+The proposed tables list (Section 4.4.1) must include corporate actions and reference data:
+
+Table: `stock_metadata`
+
+```text
+symbol              TEXT PRIMARY KEY
+isin                TEXT
+lot_size            INTEGER NOT NULL DEFAULT 1
+ciruit_limit_upper  DOUBLE PRECISION    -- price band upper
+circuit_limit_lower DOUBLE PRECISION    -- price band lower
+adjustment_factor   DOUBLE PRECISION    -- factor to convert unadjusted ↔ adjusted close
+yahoo_ticker        TEXT
+expiry_cycle        TEXT                -- null for equity_cash
+is_index            BOOLEAN DEFAULT FALSE
+
+-- Earnings and corporate actions (stored as JSON arrays for query flexibility)
+earnings_dates      JSONB               -- [{date, quarter, estimate, actual}]
+split_dates         JSONB               -- [{date, ratio_before, ratio_after}]
+dividend_dates      JSONB               -- [{date, amount, type: 'interim'/'final'/'special'}]
+bonus_dates         JSONB               -- [{date, ratio}]
+
+notes               TEXT
+updated_at          TIMESTAMPTZ NOT NULL
+```
+
+This table is populated at data collection time (from yfinance metadata) and used by:
+
+- The data pipeline to compute adjustment factors for split/dividend-adjusted closes
+- The context builder to inject an `earnings_within_N_days` flag into `MarketStatePackage`
+- The gap classifier to distinguish earnings-driven gaps from structure-driven gaps
+- The order simulator to validate the price stays within circuit limits
+
+Add to Phase 1 migrations: `stock_metadata` is needed from Day 1 of the data pipeline.
 
 ---
 
@@ -983,7 +1107,33 @@ Agent flow:
 4. Synthesize results.
 5. Emit final signal.
 
-This turns the current agent from “ask model for answer” into “model runs a repeatable analysis workflow.”
+This turns the current agent from "ask model for answer" into "model runs a repeatable analysis workflow."
+
+**AnalysisPlan schema** — produced by the planner before any tool execution. The retrieval query in Section 9.4.3 depends on this object.
+
+```python
+class AnalysisPlan(BaseModel):
+    """The agent's planned analysis direction before tool use."""
+    direction_bias: Literal["bullish", "bearish", "neutral", "unclear"]
+    setup_tags: list[str]           # Proposed setup types, e.g. ["vwap_reclaim", "pullback"]
+    areas_of_interest: list[str]    # "above_vwap", "near_support", "prior_val", etc.
+    planned_tools: list[str]        # Tools the agent plans to use
+    reason: str                     # Brief rationale for the plan
+
+    # Derived at plan time from MarketStatePackage (deterministic, not LLM-decided)
+    market_regime: str | None = None
+    session_type: str | None = None
+    gap_type: str | None = None
+    structure_state: str | None = None
+    vwap_relation: str | None = None
+    vwap_distance_atr: float | None = None
+    profile_location: str | None = None
+    price_location: str | None = None
+    time_bucket: str | None = None
+    volatility_bucket: str | None = None
+```
+
+The structured fields (`market_regime` through `volatility_bucket`) are filled deterministically from the MarketStatePackage before the LLM sees the plan, not written by the model. They form the structured query vector for memory retrieval.
 
 ### 6.2.1 Action-Specific Schema Rules
 
@@ -991,7 +1141,7 @@ The validator must enforce different required fields by action:
 
 | Action | Required Fields | Invalid When |
 |---|---|---|
-| BUY | entry, stop, target, net_reward_risk, expected_horizon_minutes, invalidation | open position exists; session not ACTIVE_TRADING; capital insufficient |
+| BUY | entry, stop, target, net_reward_risk, expected_horizon_minutes, invalidation | open position exists; session not ACTIVE_TRADING; capital insufficient (see Section 4.12) |
 | SELL | entry, stop, target, net_reward_risk, expected_horizon_minutes, invalidation | requires MIS product type (deferred); open position exists; session not ACTIVE_TRADING |
 | SKIP | reason, checklist.reason_to_wait | position is open |
 | HOLD | position_id, thesis_health, reason | no position is open |
@@ -1795,7 +1945,7 @@ Secondary:
 
 ## 11. Implementation Plan
 
-### Phase 0 — Git Hygiene and Planning
+### Phase 0 - Git Hygiene and Planning
 
 Status: started.
 
@@ -1804,28 +1954,39 @@ Status: started.
 - [x] Create agent evolution plan doc
 - [ ] Commit docs separately before code changes
 
-### Phase 1 — State, Context, and Action Semantics Foundation
+### Phase 1 - State, Context, and Action Semantics Foundation
 
 Goal: ensure the agent receives correct market context, correct portfolio state, and emits state-valid actions without leakage.
 
 Tasks:
 
 1. Add Postgres service for AlphaPulse state in `docker-compose.yml`.
-2. Add initial database migrations for runs, portfolio snapshots, positions, decisions, session maps/events/levels, memory episodes/reflections.
+2. Add initial database migrations for all tables:
+   runs, portfolio_snapshots, positions, orders_simulated, decisions,
+   session_maps, session_events, session_levels, memory_episodes,
+   memory_reflections, calibration_stats, experiment_runs,
+   data_snapshot_sets, data_snapshots, stock_metadata.
 3. Add `ContextWindowPolicy`.
 4. Rewrite daily context function to return completed daily candles only.
 5. Rewrite weekly context function to return completed weekly candles only.
 6. Standardize 15min intraday context to exactly 3 trading sessions.
-7. Add Postgres-backed `PortfolioState` and `PositionState` readers.
-8. Add `get_portfolio_state`, `get_open_position`, and `get_decision_history` deterministic tools.
-9. Add `MarketSessionController` for session phase, entry cutoff, and forced square-off.
-10. Add cooldown/re-entry read model.
-11. Update action schema:
-   - Flat: BUY / SELL / SKIP
+7. Implement `CashMarketChargesModel` (CNC delivery) with full charge breakdown.
+8. Implement configurable `SlippageModel`.
+9. Implement order simulation that applies slippage → fills orders → computes charges → creates position.
+10. Implement risk-based position sizing capped by capital ceiling (Section 4.12).
+11. Implement data snapshot sets with SHA-256 hashing per timeframe.
+12. Implement stock_metadata table population (adjustment factors, corporate actions from yfinance).
+13. Add Postgres-backed `PortfolioState` and `PositionState` readers.
+14. Add `get_portfolio_state`, `get_open_position`, `get_decision_history`, and `get_cooldown_state` deterministic tools.
+15. Add `MarketSessionController` for session phase, entry cutoff, and forced square-off.
+16. Add cooldown/re-entry read model with trade locks.
+17. Update action schema:
+   - Flat (CNC): BUY / SKIP
+   - SELL reserved for MIS (future phase)
    - Open: HOLD / EXIT
-12. Make `SKIP` the default no-trade action when no position exists.
-13. Make `HOLD` invalid when no position exists.
-14. Add a `context_contract` block to `MarketStatePackage`:
+18. Make `SKIP` the default no-trade action when no position exists.
+19. Make `HOLD` invalid when no position exists.
+20. Add a `context_contract` block to `MarketStatePackage`:
 
 ```json
 {
@@ -1841,9 +2002,12 @@ Tasks:
 18. Add tests for session phase/cutoff behavior.
 19. Add tests for cooldown/re-entry locks.
 20. Add tests for charges model and slippage-aware order simulation.
+21. Add tests for risk-based position sizing with capital ceiling.
+22. Add tests for data snapshot set hashing and multi-timeframe reproducibility.
+23. Add tests for stock_metadata ingestion and adjustment factor correctness.
 21. Add tests for data snapshot hash consistency.
 
-### Phase 2 — Structured Output Layer
+### Phase 2 - Structured Output Layer
 
 Goal: eliminate brittle JSON parsing.
 
@@ -1858,7 +2022,7 @@ Tasks:
    - Else parse + Pydantic validation + one repair retry.
 5. Journal schema validation errors.
 
-### Phase 3 — Memory Layer
+### Phase 3 - Memory Layer
 
 Goal: turn isolated decisions into coherent session analysis.
 
@@ -1877,7 +2041,7 @@ Tasks:
 4. Feed memory summary into prompt.
 5. Add `write_observation` and `get_active_session_memory` tools.
 
-### Phase 4 — Feedback + Reflection
+### Phase 4 - Feedback + Reflection
 
 Goal: let the agent learn from evaluated outcomes.
 
@@ -1889,7 +2053,7 @@ Tasks:
 4. Retrieve relevant reflections for future decisions.
 5. Add metrics comparing memory-enabled vs no-memory mode.
 
-### Phase 5 — Price Action Tools v1
+### Phase 5 - Price Action Tools v1
 
 Goal: upgrade deterministic market understanding.
 
@@ -1911,7 +2075,7 @@ Tasks:
 5. Add `detect_liquidity_zones`.
 6. Add `score_confluence`.
 
-### Phase 6 — Prompt v2: Price Action Checklist
+### Phase 6 - Prompt v2: Price Action Checklist
 
 Goal: enforce systematic reasoning.
 
@@ -1928,9 +2092,9 @@ Tasks:
 2. Require checklist scores.
 3. Require explicit reason for SKIP when flat.
 4. Require explicit reason for HOLD or EXIT when in position.
-5. Require explicit “what would prove me wrong?” for every trade.
+5. Require explicit "what would prove me wrong?" for every trade.
 
-### Phase 7 — Agentic Planner / LangGraph Workflow
+### Phase 7 - Agentic Planner / LangGraph Workflow
 
 Goal: enable deeper analysis without random tool use and without reinventing generic workflow plumbing.
 
@@ -1948,7 +2112,7 @@ Tasks:
    - Must call `get_portfolio_state` before BUY/SELL.
    - Must call `get_open_position` before HOLD/EXIT.
 
-### Phase 8 — Calibration and Experiments
+### Phase 8 - Calibration and Experiments
 
 Goal: measure whether the agent is improving.
 
@@ -1988,17 +2152,20 @@ Includes:
 15. State-action validator:
    - flat state (CNC) allows BUY / SKIP
    - open position state allows HOLD / EXIT
-16. Pydantic signal schema or LangChain structured output wrapper
-17. Schema validation wrapper around current DartAgent
-18. Tests for context leakage, portfolio/slippage/charges serialization, session boundary behavior,
-   cooldown locks, action-state validity, and data snapshot hash consistency
+16. Risk-based position sizing capped by capital ceiling (Section 4.12)
+17. stock_metadata table with corporate action and adjustment factor support
+18. Pydantic signal schema with AnalysisPlan model
+19. Schema validation wrapper around current DartAgent
+20. Tests for context leakage, portfolio/slippage/charges serialization, risk-based sizing,
+    session boundary behavior, cooldown locks, multi-timeframe snapshot hashing,
+    stock_metadata ingestion, and action-state validity
 ```
 
 Do **not** implement VWAP, volume profile, full memory retrieval, and full prompt rewrite in the same PR. Those should be separate PRs. Postgres state and action semantics should come first because every future memory and evaluation layer depends on them.
 
 ---
 
-## 13. What “Predict the Future Properly” Means
+## 13. What "Predict the Future Properly" Means
 
 The agent should not try to literally predict exact future candles.
 
