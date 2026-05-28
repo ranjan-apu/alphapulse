@@ -128,7 +128,13 @@ def run_replay(
     df_daily = data["daily"]
     df_weekly = data["weekly"]
 
-    # Initialize components
+    # Agent workflow selection
+    agent_workflow = config.AGENT_WORKFLOW.lower()
+    if agent_workflow == "graph":
+        print(f"\n  [WARNING] AGENT_WORKFLOW=graph is set but the LangGraph integration is not yet wired into the replay loop.")
+        print(f"             Falling back to 'direct' workflow (DartAgent).")
+        print(f"             Set AGENT_WORKFLOW=direct in .env to suppress this warning.")
+
     clock = WalkForwardClock(df_5m)
     agent = DartAgent()
     journal = SignalJournal()

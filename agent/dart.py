@@ -168,18 +168,18 @@ class DartAgent:
                         f"- Current bias: {sess_map.get('current_bias')}"
                     )
                 
-                # Fetch memory
-                episodes = uow.memory.get_episodes(config.SYMBOL, limit=3)
-                reflections = uow.memory.get_reflections(config.SYMBOL, limit=3)
+                # Initial generic memory fetch (used before analysis plan is available)
+                generic_episodes = uow.memory.get_episodes(config.SYMBOL, limit=3)
+                generic_reflections = uow.memory.get_reflections(config.SYMBOL, limit=3)
                 
                 mem_lines = []
-                if episodes:
+                if generic_episodes:
                     mem_lines.append("Recent Episodes:")
-                    for ep in episodes:
+                    for ep in generic_episodes:
                         mem_lines.append(f"  - Setup: {ep.get('setup_tags')}, Action: {ep.get('action')}, Outcome: {ep.get('outcome_label')} ({ep.get('outcome_net_r')}R)")
-                if reflections:
+                if generic_reflections:
                     mem_lines.append("Reflections/Lessons:")
-                    for refl in reflections:
+                    for refl in generic_reflections:
                         mem_lines.append(f"  - Lesson: {refl.get('lesson')} (confidence: {refl.get('confidence')})")
                 memory_summary = "\n".join(mem_lines)
 
@@ -247,13 +247,23 @@ class DartAgent:
                             "content": f"Your analysis_plan failed schema validation: {exc}. Output a valid analysis_plan JSON object before requesting tools."
                         })
                         continue
+
+                    # Build focused memory context from the analysis plan fields
+                    focused_memory = self._build_focused_memory_context(parsed, run_id, config.SYMBOL)
+
+                    memory_injection = (
+                        "Plan accepted.\n\n"
+                        "Retrieved relevant past episodes and lessons matching today's context:\n"
+                        f"{focused_memory}\n\n"
+                        "Now execute your required tools in sequence, and synthesize your final signal when ready."
+                    )
                     messages.append({
                         "role": "assistant",
                         "content": response
                     })
                     messages.append({
                         "role": "user",
-                        "content": "Plan accepted. Now retrieve memories/lessons if needed, execute your required tools in sequence, and synthesize your final signal when ready."
+                        "content": memory_injection
                     })
                     continue
 
@@ -379,6 +389,163 @@ class DartAgent:
         except Exception as e:
             print(f"  [LLM Error] {e}")
             return None
+
+    def _build_focused_memory_context(
+        self,
+        analysis_plan: Dict,
+        run_id: Optional[str],
+        symbol: str,
+        max_episodes: int = 5,
+        max_reflections: int = 5,
+    ) -> str:
+        """
+        Build a focused memory context from analysis plan fields.
+
+        After the analysis plan is validated, this retrieves episodes and
+        reflections that match the plan's context (regime, session type,
+        structure state, setup tags, direction) using weighted feature
+        similarity, rather than returning generic recent episodes.
+        """
+        if not run_id or not symbol:
+            return "No run context available for memory retrieval."
+
+        from db.unit_of_work import UnitOfWork
+
+        plan_regime = (analysis_plan.get("market_regime") or "").lower()
+        plan_session = (analysis_plan.get("session_type") or "").lower()
+        plan_structure = (analysis_plan.get("structure_state") or "").lower()
+        plan_vwap = (analysis_plan.get("vwap_relation") or "").lower()
+        plan_gap = (analysis_plan.get("gap_type") or "").lower()
+        plan_profile = (analysis_plan.get("profile_location") or "").lower()
+        plan_price = (analysis_plan.get("price_location") or "").lower()
+        plan_time = (analysis_plan.get("time_bucket") or "").lower()
+        plan_volatility = (analysis_plan.get("volatility_bucket") or "").lower()
+        plan_setup_tags = set(analysis_plan.get("setup_tags") or [])
+        plan_direction = (analysis_plan.get("direction_bias") or "").lower()
+
+        with UnitOfWork() as uow:
+            all_episodes = uow.memory.get_episodes(symbol, limit=50)
+            all_reflections = uow.memory.get_reflections(symbol, limit=30)
+
+        if not all_episodes and not all_reflections:
+            return "No past episodes or lessons available for this symbol."
+
+        # Score each episode using weighted feature similarity
+        # Weights match MemoryStore.retrieve_similar_setups logic in memory.py
+        scored_episodes = []
+        for ep in all_episodes:
+            score = 0.0
+            matches = []
+
+            # Regime match (0.20)
+            if plan_regime and ep.get("market_regime", "").lower() == plan_regime:
+                score += 0.20
+                matches.append("regime")
+
+            # Session type match (0.15)
+            if plan_session and ep.get("session_type", "").lower() == plan_session:
+                score += 0.15
+                matches.append("session")
+
+            # Structure state match (0.15)
+            if plan_structure and ep.get("structure_state", "").lower() == plan_structure:
+                score += 0.15
+                matches.append("structure")
+
+            # VWAP relation match (0.10)
+            if plan_vwap and ep.get("vwap_relation", "").lower() == plan_vwap:
+                score += 0.10
+                matches.append("vwap")
+
+            # Gap type match (0.10)
+            if plan_gap and ep.get("gap_type", "").lower() == plan_gap:
+                score += 0.10
+                matches.append("gap")
+
+            # Profile location match (0.05)
+            if plan_profile and ep.get("profile_location", "").lower() == plan_profile:
+                score += 0.05
+                matches.append("profile")
+
+            # Price location match (0.05)
+            if plan_price and ep.get("price_location", "").lower() == plan_price:
+                score += 0.05
+                matches.append("price")
+
+            # Time bucket match (0.05)
+            if plan_time and ep.get("time_bucket", "").lower() == plan_time:
+                score += 0.05
+                matches.append("time")
+
+            # Volatility bucket match (0.05)
+            if plan_volatility and ep.get("volatility_bucket", "").lower() == plan_volatility:
+                score += 0.05
+                matches.append("volatility")
+
+            # Setup tag overlap (0.10)
+            ep_tags = set(ep.get("setup_tags") or [])
+            if plan_setup_tags and ep_tags:
+                overlap = len(plan_setup_tags & ep_tags)
+                tag_frac = overlap / max(len(plan_setup_tags), 1)
+                score += 0.10 * min(tag_frac, 1.0)
+                if overlap > 0:
+                    matches.append(f"{overlap} tag(s)")
+
+            if score > 0:
+                scored_episodes.append((ep, score, matches))
+
+        # Sort by score descending, take top N
+        scored_episodes.sort(key=lambda x: x[1], reverse=True)
+        top_episodes = scored_episodes[:max_episodes]
+
+        # Score reflections by tag overlap and direction
+        scored_reflections = []
+        for ref in all_reflections:
+            ref_score = 0.0
+            ref_tags = set(ref.get("tags") or [])
+            ref_direction = (ref.get("direction") or "").lower()
+
+            if plan_setup_tags and ref_tags:
+                overlap = len(plan_setup_tags & ref_tags)
+                ref_score += 0.5 * min(overlap / max(len(plan_setup_tags), 1), 1.0)
+
+            if plan_direction and ref_direction == plan_direction:
+                ref_score += 0.3
+
+            ref_score += 0.2 * ref.get("confidence", 0.0)
+
+            if ref_score > 0:
+                scored_reflections.append((ref, ref_score))
+
+        scored_reflections.sort(key=lambda x: x[1], reverse=True)
+        top_reflections = scored_reflections[:max_reflections]
+
+        # Build formatted output
+        lines = []
+        if top_episodes:
+            lines.append(f"Retrieved {len(top_episodes)} relevant past episodes (filtered by analysis plan context):")
+            for ep, score, matches in top_episodes:
+                outcome = ep.get("outcome_label", "unknown")
+                net_r = ep.get("outcome_net_r", "?")
+                action = ep.get("action", "?")
+                tags = ep.get("setup_tags", [])
+                lines.append(
+                    f"  [{score:.2f}] {action} | Setup: {tags} | "
+                    f"Outcome: {outcome} ({net_r}R) | "
+                    f"Matched on: {', '.join(matches)}"
+                )
+        else:
+            lines.append("No past episodes matched the current analysis plan context.")
+
+        if top_reflections:
+            lines.append(f"\nRelevant lessons ({len(top_reflections)}):")
+            for ref, score in top_reflections:
+                lesson = ref.get("lesson", "")[:120]
+                confidence = ref.get("confidence", 0.0)
+                tags = ref.get("tags", [])
+                lines.append(f"  [{score:.2f}] \"{lesson}\" (confidence: {confidence}, tags: {tags})")
+
+        return "\n".join(lines)
 
     def _fallback_signal(self, reason: str, has_open_position: bool) -> Dict:
         """Generate a state-aware fallback signal."""
