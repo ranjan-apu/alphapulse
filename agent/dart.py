@@ -236,7 +236,7 @@ class DartAgent:
                     continue
                 else:
                     try:
-                        AnalysisPlan.model_validate(parsed)
+                        validated_plan = AnalysisPlan.model_validate(parsed)
                     except Exception as exc:
                         messages.append({
                             "role": "assistant",
@@ -249,7 +249,7 @@ class DartAgent:
                         continue
 
                     # Build focused memory context from the analysis plan fields
-                    focused_memory = self._build_focused_memory_context(parsed, run_id, config.SYMBOL)
+                    focused_memory = self._build_focused_memory_context(validated_plan, run_id, config.SYMBOL)
 
                     memory_injection = (
                         "Plan accepted.\n\n"
@@ -392,7 +392,7 @@ class DartAgent:
 
     def _build_focused_memory_context(
         self,
-        analysis_plan: Dict,
+        analysis_plan: AnalysisPlan,
         run_id: Optional[str],
         symbol: str,
         max_episodes: int = 5,
@@ -401,27 +401,46 @@ class DartAgent:
         """
         Build a focused memory context from analysis plan fields.
 
-        After the analysis plan is validated, this retrieves episodes and
-        reflections that match the plan's context (regime, session type,
-        structure state, setup tags, direction) using weighted feature
-        similarity, rather than returning generic recent episodes.
+        After the analysis plan is validated, this builds the same structured
+        retrieval query used by MemoryStore and applies it to persisted
+        episodes/reflections, rather than returning generic recent episodes.
         """
         if not run_id or not symbol:
             return "No run context available for memory retrieval."
 
+        from agent.memory import MemoryStore
         from db.unit_of_work import UnitOfWork
 
-        plan_regime = (analysis_plan.get("market_regime") or "").lower()
-        plan_session = (analysis_plan.get("session_type") or "").lower()
-        plan_structure = (analysis_plan.get("structure_state") or "").lower()
-        plan_vwap = (analysis_plan.get("vwap_relation") or "").lower()
-        plan_gap = (analysis_plan.get("gap_type") or "").lower()
-        plan_profile = (analysis_plan.get("profile_location") or "").lower()
-        plan_price = (analysis_plan.get("price_location") or "").lower()
-        plan_time = (analysis_plan.get("time_bucket") or "").lower()
-        plan_volatility = (analysis_plan.get("volatility_bucket") or "").lower()
-        plan_setup_tags = set(analysis_plan.get("setup_tags") or [])
-        plan_direction = (analysis_plan.get("direction_bias") or "").lower()
+        query = MemoryStore().build_retrieval_query(
+            symbol=symbol,
+            analysis_plan=analysis_plan,
+            market_regime=analysis_plan.market_regime or "unclear",
+            session_type=analysis_plan.session_type or "unclear",
+            gap_type=analysis_plan.gap_type or "no_gap",
+            structure_state=analysis_plan.structure_state or "unclear",
+            vwap_relation=analysis_plan.vwap_relation or "at_vwap",
+            vwap_distance_atr=analysis_plan.vwap_distance_atr,
+            profile_location=analysis_plan.profile_location or "no_data",
+            price_location=analysis_plan.price_location or "unknown",
+            time_bucket=analysis_plan.time_bucket or "unknown",
+            volatility_bucket=analysis_plan.volatility_bucket or "unknown",
+        )
+
+        plan_regime = (query.get("market_regime") or "").lower()
+        plan_session = (query.get("session_type") or "").lower()
+        plan_structure = (query.get("structure_state") or "").lower()
+        plan_vwap = (query.get("vwap_relation") or "").lower()
+        plan_gap = (query.get("gap_type") or "").lower()
+        plan_profile = (query.get("profile_location") or "").lower()
+        plan_price = (query.get("price_location") or "").lower()
+        plan_time = (query.get("time_bucket") or "").lower()
+        plan_volatility = (query.get("volatility_bucket") or "").lower()
+        plan_setup_tags = set(query.get("setup_tags") or [])
+        plan_direction = (query.get("direction") or "").lower()
+        direction_aliases = {
+            "bullish": {"bullish", "buy", "long"},
+            "bearish": {"bearish", "sell", "short"},
+        }.get(plan_direction, {plan_direction} if plan_direction else set())
 
         with UnitOfWork() as uow:
             all_episodes = uow.memory.get_episodes(symbol, limit=50)
@@ -438,47 +457,47 @@ class DartAgent:
             matches = []
 
             # Regime match (0.20)
-            if plan_regime and ep.get("market_regime", "").lower() == plan_regime:
+            if plan_regime and str(ep.get("market_regime") or "").lower() == plan_regime:
                 score += 0.20
                 matches.append("regime")
 
             # Session type match (0.15)
-            if plan_session and ep.get("session_type", "").lower() == plan_session:
+            if plan_session and str(ep.get("session_type") or "").lower() == plan_session:
                 score += 0.15
                 matches.append("session")
 
             # Structure state match (0.15)
-            if plan_structure and ep.get("structure_state", "").lower() == plan_structure:
+            if plan_structure and str(ep.get("structure_state") or "").lower() == plan_structure:
                 score += 0.15
                 matches.append("structure")
 
             # VWAP relation match (0.10)
-            if plan_vwap and ep.get("vwap_relation", "").lower() == plan_vwap:
+            if plan_vwap and str(ep.get("vwap_relation") or "").lower() == plan_vwap:
                 score += 0.10
                 matches.append("vwap")
 
             # Gap type match (0.10)
-            if plan_gap and ep.get("gap_type", "").lower() == plan_gap:
+            if plan_gap and str(ep.get("gap_type") or "").lower() == plan_gap:
                 score += 0.10
                 matches.append("gap")
 
             # Profile location match (0.05)
-            if plan_profile and ep.get("profile_location", "").lower() == plan_profile:
+            if plan_profile and str(ep.get("profile_location") or "").lower() == plan_profile:
                 score += 0.05
                 matches.append("profile")
 
             # Price location match (0.05)
-            if plan_price and ep.get("price_location", "").lower() == plan_price:
+            if plan_price and str(ep.get("price_location") or "").lower() == plan_price:
                 score += 0.05
                 matches.append("price")
 
             # Time bucket match (0.05)
-            if plan_time and ep.get("time_bucket", "").lower() == plan_time:
+            if plan_time and str(ep.get("time_bucket") or "").lower() == plan_time:
                 score += 0.05
                 matches.append("time")
 
             # Volatility bucket match (0.05)
-            if plan_volatility and ep.get("volatility_bucket", "").lower() == plan_volatility:
+            if plan_volatility and str(ep.get("volatility_bucket") or "").lower() == plan_volatility:
                 score += 0.05
                 matches.append("volatility")
 
@@ -509,7 +528,7 @@ class DartAgent:
                 overlap = len(plan_setup_tags & ref_tags)
                 ref_score += 0.5 * min(overlap / max(len(plan_setup_tags), 1), 1.0)
 
-            if plan_direction and ref_direction == plan_direction:
+            if direction_aliases and ref_direction in direction_aliases:
                 ref_score += 0.3
 
             ref_score += 0.2 * ref.get("confidence", 0.0)
