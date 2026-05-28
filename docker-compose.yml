@@ -11,6 +11,26 @@ services:
     command: redis-server --appendonly yes
     restart: unless-stopped
 
+  # ---- AlphaPulse Postgres (source of truth for portfolio, decisions, memory) ----
+  alphapulse-db:
+    image: pgvector/pgvector:pg16
+    container_name: tsd-alphapulse-db
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=alphapulse
+      - POSTGRES_PASSWORD=alphapulse
+      - POSTGRES_DB=alphapulse
+    volumes:
+      - alphapulse_db_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphapulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   langfuse-server:
     image: ghcr.io/langfuse/langfuse:latest
     container_name: tsd-langfuse
@@ -38,3 +58,4 @@ services:
 volumes:
   redis_data:
   langfuse_db_data:
+  alphapulse_db_data:
