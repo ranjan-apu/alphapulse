@@ -16,7 +16,6 @@ Whitelist:
 - plot_context_dashboard()
 - get_historical_data(timeframe, startDate, endDate)
 """
-import math
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
@@ -142,9 +141,13 @@ class ToolHarness:
                 self.df_5m[self.df_5m.index <= self.decision_time], "1h"
             )
         elif tf_lower in ("daily", "1d", "day", "d", "macro"):
-            return self.df_daily[self.df_daily.index <= self.decision_time]
+            from core.context_window import get_completed_daily_context
+            completed, _, _ = get_completed_daily_context(self.df_daily, self.decision_time, months=config.MACRO_MONTHS)
+            return completed
         elif tf_lower in ("weekly", "1w", "week", "w", "htf"):
-            return self.df_weekly[self.df_weekly.index <= self.decision_time]
+            from core.context_window import get_completed_weekly_context
+            completed, _, _ = get_completed_weekly_context(self.df_weekly, self.decision_time, months=config.HTF_MONTHS)
+            return completed
         else:
             # Default: 5m
             return self.df_5m[self.df_5m.index <= self.decision_time]
@@ -295,17 +298,14 @@ class ToolHarness:
         return risk
 
     def _calculate_trade_math(self, args: Dict) -> Dict:
-        """
-        Deterministic trade math calculator.
-        Does NOT delegate arithmetic to the LLM.
-        Uses ₹30,000 capital cap and ₹60 round-trip charges.
-        """
+        """Deterministic trade math calculator using plan-compliant sizing."""
         entry_price = float(args["entry_price"])
         stop_price = float(args["stop_price"])
         target_price = float(args["target_price"])
         direction = str(args.get("direction", "BUY")).upper()
         capital_cap = float(args.get("capital_cap", config.CAPITAL_CAP))
-        order_charge = float(args.get("order_charge", config.TOTAL_ORDER_CHARGES))
+        starting_capital = float(args.get("starting_capital", 100000.0))
+        risk_budget_pct = float(args.get("risk_budget_pct", 0.01))
 
         # Validate
         if entry_price <= 0 or stop_price <= 0 or target_price <= 0:
@@ -313,42 +313,30 @@ class ToolHarness:
         if direction not in ("BUY", "SELL"):
             return {"error": "Direction must be BUY or SELL."}
 
-        # Quantity: floor(capital_cap / entry_price)
-        quantity = math.floor(capital_cap / entry_price)
-        if quantity <= 0:
-            return {
-                "error": f"Entry price {entry_price} exceeds capital cap {capital_cap}. Cannot size position.",
-                "quantity": 0,
-                "actionable": False,
-            }
+        from core.charges import EquityCashCharges, compute_charges
+        from core.position_sizing import PositionSizingConfig, compute_position_size
 
-        actual_deployed_capital = quantity * entry_price
-
-        # Calculate risk and reward
-        if direction == "BUY":
-            gross_risk = quantity * (entry_price - stop_price)
-            gross_target_profit = quantity * (target_price - entry_price)
-        else:  # SELL
-            gross_risk = quantity * (stop_price - entry_price)
-            gross_target_profit = quantity * (entry_price - target_price)
-
-        # Validation checks
-        errors = []
-        if gross_risk <= 0:
-            errors.append("Stop price is on wrong side of entry.")
-
-        if gross_target_profit <= 0:
-            errors.append("Target price is on wrong side of entry.")
-
-        # Calculate net after charges
-        total_charges = order_charge  # ₹60 round-trip
-        net_target_profit = gross_target_profit - total_charges
-
-        # Net reward-to-risk
-        net_rr = net_target_profit / gross_risk if gross_risk > 0 else 0
-
-        # 2:1 validation
-        meets_rr_threshold = net_target_profit >= (config.MIN_REWARD_TO_RISK * gross_risk)
+        sizing_config = PositionSizingConfig(
+            starting_capital=starting_capital,
+            risk_budget_pct=risk_budget_pct,
+            max_capital_per_trade=capital_cap,
+            min_net_reward_risk=config.MIN_REWARD_TO_RISK,
+        )
+        preliminary = compute_position_size(
+            entry_price, stop_price, target_price, direction, sizing_config, total_charges=0
+        )
+        quantity_for_charge = max(preliminary.quantity, 1)
+        charge_result = compute_charges(
+            EquityCashCharges(), direction, quantity_for_charge, entry_price, target_price
+        )
+        sizing = compute_position_size(
+            entry_price,
+            stop_price,
+            target_price,
+            direction,
+            sizing_config,
+            total_charges=charge_result.total_charges,
+        )
 
         result = {
             "entry_price": float(round(entry_price, 2)),
@@ -356,25 +344,28 @@ class ToolHarness:
             "target_price": float(round(target_price, 2)),
             "direction": direction,
             "capital_cap": float(capital_cap),
-            "quantity": quantity,
-            "actual_deployed_capital": float(round(actual_deployed_capital, 2)),
-            "total_order_charges": float(round(total_charges, 2)),
-            "gross_risk": float(round(gross_risk, 2)),
-            "gross_target_profit": float(round(gross_target_profit, 2)),
-            "net_target_profit": float(round(net_target_profit, 2)),
-            "net_reward_to_risk": float(round(net_rr, 4)),
-            "meets_2_to_1_threshold": meets_rr_threshold,
-            "risk_per_share": float(round(abs(entry_price - stop_price), 2)),
-            "reward_per_share": float(round(abs(target_price - entry_price), 2)),
-            "gross_rr": float(round(abs(target_price - entry_price) / abs(entry_price - stop_price), 4))
-            if abs(entry_price - stop_price) > 0 else 0,
-            "actionable": True,
+            "risk_budget": sizing_config.risk_budget,
+            "quantity": sizing.quantity,
+            "actual_deployed_capital": sizing.deployed_capital,
+            "total_order_charges": charge_result.total_charges,
+            "charge_breakdown": charge_result.breakdown,
+            "gross_risk": sizing.gross_risk,
+            "gross_target_profit": sizing.gross_reward,
+            "net_target_profit": sizing.net_reward,
+            "net_reward_to_risk": sizing.net_reward_risk,
+            "meets_2_to_1_threshold": sizing.net_reward_risk >= config.MIN_REWARD_TO_RISK,
+            "risk_per_share": sizing.risk_per_share,
+            "reward_per_share": sizing.reward_per_share,
+            "gross_rr": sizing.gross_reward_risk,
+            "risk_budget_used_pct": sizing.risk_budget_used,
+            "capital_ceiling_hit": sizing.capital_ceiling_hit,
+            "risk_budget_hit": sizing.risk_budget_hit,
+            "warnings": sizing.warnings,
+            "actionable": sizing.actionable,
         }
 
-        if errors:
-            result["errors"] = errors
-            result["actionable"] = False
-            result["meets_2_to_1_threshold"] = False
+        if sizing.errors:
+            result["errors"] = sizing.errors
 
         return result
 

@@ -254,6 +254,81 @@ class TestPositionSizing:
 
 
 # ============================================================
+# State-Aware Validator Tests
+# ============================================================
+
+class TestStateAwareValidator:
+    def test_flat_hold_rejected(self):
+        from validation.validator import validate_signal
+
+        T = IST.localize(datetime(2026, 5, 28, 10, 0))
+        session_end = IST.localize(datetime(2026, 5, 28, 15, 30))
+        result = validate_signal(
+            {"action": "HOLD", "position_id": "pos_1", "reason": "wait"},
+            T,
+            session_end,
+            has_open_position=False,
+        )
+
+        assert not result["is_valid"]
+        assert result["rejection_reason"] == "REJECTED_INVALID_ACTION_FOR_STATE"
+
+    def test_open_position_skip_rejected(self):
+        from validation.validator import validate_signal
+
+        T = IST.localize(datetime(2026, 5, 28, 10, 0))
+        session_end = IST.localize(datetime(2026, 5, 28, 15, 30))
+        result = validate_signal(
+            {"action": "SKIP", "reason": "no setup"},
+            T,
+            session_end,
+            has_open_position=True,
+        )
+
+        assert not result["is_valid"]
+        assert result["rejection_reason"] == "REJECTED_INVALID_ACTION_FOR_STATE"
+
+    def test_cnc_sell_entry_rejected(self):
+        from validation.validator import validate_signal
+
+        T = IST.localize(datetime(2026, 5, 28, 10, 0))
+        session_end = IST.localize(datetime(2026, 5, 28, 15, 30))
+        signal = {
+            "action": "SELL",
+            "entry": 2400.0,
+            "stop": 2420.0,
+            "target": 2340.0,
+            "expected_horizon_minutes": 45,
+            "dart": {"trigger": "15m breakdown"},
+            "reason": "short setup",
+        }
+        result = validate_signal(signal, T, session_end, has_open_position=False)
+
+        assert not result["is_valid"]
+        assert result["rejection_reason"] == "REJECTED_SELL_REQUIRES_MIS"
+
+    def test_buy_uses_risk_budget_and_capital_ceiling(self):
+        from validation.validator import validate_signal
+
+        T = IST.localize(datetime(2026, 5, 28, 10, 0))
+        session_end = IST.localize(datetime(2026, 5, 28, 15, 30))
+        signal = {
+            "action": "BUY",
+            "entry": 2400.0,
+            "stop": 2320.0,
+            "target": 2600.0,
+            "expected_horizon_minutes": 45,
+            "dart": {"trigger": "15m close above retest"},
+            "reason": "wide-stop trend continuation",
+        }
+        result = validate_signal(signal, T, session_end, has_open_position=False)
+
+        assert result["is_valid"]
+        assert result["sizing"]["quantity"] == 12
+        assert result["sizing"]["gross_risk"] <= result["sizing"]["risk_budget"]
+
+
+# ============================================================
 # Session Controller Tests
 # ============================================================
 

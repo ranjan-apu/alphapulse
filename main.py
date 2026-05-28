@@ -238,21 +238,37 @@ def run_replay(
             agent_result = agent.decide(package, market_state_text, harness)
         except Exception as e:
             print(f"\n  [Agent error: {e}]")
+            current_position = position.get_position() or {}
             agent_result = {
                 "raw_responses": [str(e)],
                 "tool_calls": [],
                 "final_signal": {
                     "type": "final_signal",
-                    "action": "HOLD",
+                    "action": "HOLD" if has_pos else "SKIP",
                     "confidence": 0.0,
                     "dart": {"direction": "", "area": "", "risk": "", "trigger": ""},
+                    "checklist": {
+                        "market_regime": "unclear",
+                        "session_type": "unclear",
+                        "structure_state": "unclear",
+                        "location_quality": 0,
+                        "trigger_quality": 0,
+                        "risk_quality": 0,
+                        "volume_confirmation": 0,
+                        "reason_to_wait": "LLM failed; flat-state fallback is SKIP",
+                    },
                     "entry": None, "stop": None, "target": None,
+                    "position_id": current_position.get("position_id") if has_pos else None,
+                    "thesis_health": "valid" if has_pos else "not_applicable",
                     "reason": f"Agent error: {e}",
                     "invalidation": None,
                 },
             }
 
         signal = agent_result.get("final_signal", {})
+        if has_pos and signal.get("action") in ("HOLD", "EXIT") and not signal.get("position_id"):
+            current_position = position.get_position() or {}
+            signal["position_id"] = current_position.get("position_id") or "open_position"
 
         # ---- Update charts with signal levels ----
         entry = signal.get("entry")
@@ -261,7 +277,7 @@ def run_replay(
 
         # Regenerate charts with signal levels
         final_charts = initial_charts
-        raw_action = signal.get("action", "HOLD")
+        raw_action = signal.get("action", "HOLD" if has_pos else "SKIP")
         if raw_action in ("BUY", "SELL") and entry and stop and target:
             try:
                 final_charts = generate_all_charts(
@@ -271,19 +287,12 @@ def run_replay(
                 pass  # Keep initial charts
 
         # ---- Validate Signal ----
-        validation_result = validate_signal(signal, T, session_end)
+        validation_result = validate_signal(signal, T, session_end, has_open_position=has_pos)
 
         # ---- Auto-open position if valid BUY/SELL ----
         is_valid = validation_result.get("is_valid", False)
         final_action = validation_result.get("action", signal.get("action", "HOLD"))
         sizing = validation_result.get("sizing", {})
-
-        if is_valid and final_action in ("BUY", "SELL") and has_pos:
-            validation_result["is_valid"] = False
-            validation_result["rejection_reason"] = "REJECTED_POSITION_OPEN"
-            validation_result["action"] = "REJECTED_POSITION_OPEN"
-            is_valid = False
-            final_action = "REJECTED_POSITION_OPEN"
 
         if is_valid and final_action in ("BUY", "SELL") and not has_pos:
             position.open_position(

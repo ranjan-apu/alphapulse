@@ -71,6 +71,7 @@ class PriceActionChecklist(BaseModel):
     trigger_quality: int = Field(default=0, ge=0, le=5, description="Entry timing quality (Plan 8.1 T)")
     risk_quality: int = Field(default=0, ge=0, le=5, description="Invalidation clarity (Plan 8.1 R)")
     volume_confirmation: int = Field(default=0, ge=0, le=5)
+    higher_tf_alignment: int = Field(default=0, ge=0, le=5)
     confluence_score: int = Field(default=0, ge=0, le=5, description="Overall factor alignment")
 
     reason_to_wait: Optional[str] = None
@@ -195,8 +196,9 @@ class FinalSignal(BaseModel):
             return True
 
         checklist = self.checklist
+        direction_score = checklist.direction_score or checklist.higher_tf_alignment
         return (
-            checklist.direction_score >= 3
+            direction_score >= 3
             and checklist.location_quality >= 4
             and checklist.trigger_quality >= 3
             and checklist.risk_quality >= 4

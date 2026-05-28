@@ -44,6 +44,54 @@ def _ensure_tz(ts: datetime) -> datetime:
     return ts.astimezone(IST)
 
 
+def _timeframe_to_minutes(timeframe: str) -> int:
+    """Parse simple intraday timeframe labels like 5m, 15min, 1h."""
+    value = timeframe.strip().lower()
+    if value.endswith("min"):
+        return int(value[:-3])
+    if value.endswith("m"):
+        return int(value[:-1])
+    if value.endswith("h"):
+        return int(value[:-1]) * 60
+    return 15
+
+
+def _maybe_resample_intraday(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    Resample finer intraday data to the requested decision timeframe.
+
+    Resampled bars are labeled at the right edge, so a 09:15-09:30 bar is
+    available to the agent at 09:30, never before it closes.
+    """
+    if df.empty:
+        return df.copy()
+
+    target_minutes = _timeframe_to_minutes(timeframe)
+    sorted_df = df.sort_index()
+    if len(sorted_df.index) >= 2:
+        diffs = sorted_df.index.to_series().diff().dropna()
+        if not diffs.empty:
+            source_minutes = diffs.median().total_seconds() / 60
+            if source_minutes >= target_minutes:
+                return sorted_df.copy()
+
+    if target_minutes <= 5:
+        return sorted_df.copy()
+
+    return sorted_df.resample(
+        f"{target_minutes}min",
+        label="right",
+        closed="left",
+        origin="start_day",
+    ).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).dropna()
+
+
 def get_completed_weekly_context(
     df_weekly: pd.DataFrame,
     T: datetime,
@@ -127,8 +175,10 @@ def get_completed_intraday_context(
     """
     T = _ensure_tz(T)
 
-    # Strictly include only candles with index <= T (completed candles)
-    available = df_intraday[df_intraday.index <= T].copy()
+    completed_bars = _maybe_resample_intraday(df_intraday, timeframe)
+
+    # Strictly include only candles with right-edge timestamp <= T.
+    available = completed_bars[completed_bars.index <= T].copy()
     if available.empty:
         return available
 

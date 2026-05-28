@@ -17,6 +17,13 @@ from core.summarizer import (
     price_location,
     estimate_risk,
 )
+from core.context_window import (
+    ContextWindowPolicy,
+    build_context_contract,
+    get_completed_daily_context,
+    get_completed_intraday_context,
+    get_completed_weekly_context,
+)
 
 
 def filter_to_t(df: pd.DataFrame, T: datetime) -> pd.DataFrame:
@@ -26,15 +33,14 @@ def filter_to_t(df: pd.DataFrame, T: datetime) -> pd.DataFrame:
 
 def get_micro_context(df_intraday: pd.DataFrame, T: datetime) -> pd.DataFrame:
     """
-    Get the last configured trading sessions of 5-minute data up to T.
+    Get the last configured trading sessions of completed decision-timeframe data.
     """
-    available = df_intraday[df_intraday.index <= T].copy()
-    if available.empty:
-        return available
-
-    session_dates = pd.Index(available.index.date).unique()
-    selected_dates = set(session_dates[-config.MICRO_DAYS:])
-    return available[[idx.date() in selected_dates for idx in available.index]].copy()
+    return get_completed_intraday_context(
+        df_intraday,
+        T,
+        sessions=config.MICRO_DAYS,
+        timeframe=config.DECISION_INTERVAL,
+    )
 
 
 def has_full_micro_context(df_intraday: pd.DataFrame, T: datetime) -> bool:
@@ -50,20 +56,18 @@ def has_full_micro_context(df_intraday: pd.DataFrame, T: datetime) -> bool:
 
 def get_macro_context(df_daily: pd.DataFrame, T: datetime) -> pd.DataFrame:
     """
-    Get the last configured month of daily data up to T.
+    Get completed daily candles only; exclude the current intraday day.
     """
-    cutoff = pd.Timestamp(T) - pd.DateOffset(months=config.MACRO_MONTHS)
-    macro = df_daily[(df_daily.index <= T) & (df_daily.index >= cutoff)].copy()
-    return macro
+    completed, _, _ = get_completed_daily_context(df_daily, T, months=config.MACRO_MONTHS)
+    return completed
 
 
 def get_htf_context(df_weekly: pd.DataFrame, T: datetime) -> pd.DataFrame:
     """
-    Get the last configured months of weekly data up to T.
+    Get completed weekly candles only; exclude the week containing T.
     """
-    cutoff = pd.Timestamp(T) - pd.DateOffset(months=config.HTF_MONTHS)
-    htf = df_weekly[(df_weekly.index <= T) & (df_weekly.index >= cutoff)].copy()
-    return htf
+    completed, _, _ = get_completed_weekly_context(df_weekly, T, months=config.HTF_MONTHS)
+    return completed
 
 
 def build_market_state_package(
@@ -79,10 +83,22 @@ def build_market_state_package(
     Provides compact summaries plus enough raw data for the agent to reason.
     Leakage rule: ALL data slices are filtered to timestamp <= T.
     """
-    # ---- Context slices (all filtered <= T) ----
+    # ---- Context slices (all filtered to completed candles available at T) ----
     micro = get_micro_context(data_5m, T)
     macro = get_macro_context(data_daily, T)
     htf = get_htf_context(data_weekly, T)
+    context_contract = build_context_contract(
+        data_weekly,
+        data_daily,
+        data_5m,
+        T,
+        ContextWindowPolicy(
+            weekly_months=config.HTF_MONTHS,
+            daily_months=config.MACRO_MONTHS,
+            intraday_sessions=config.MICRO_DAYS,
+            intraday_timeframe=config.DECISION_INTERVAL,
+        ),
+    )
 
     timeframe_label = config.INTRADAY_TIMEFRAME_LABEL
 
@@ -167,10 +183,11 @@ def build_market_state_package(
         "decision_time": str(T),
         "intraday_timeframe": timeframe_label,
         "context_windows": {
-            "weekly": f"last {config.HTF_MONTHS} months ending at decision time",
-            "daily": f"last {config.MACRO_MONTHS} month ending at decision time",
-            "intraday": f"last {config.MICRO_DAYS} trading sessions of {timeframe_label} candles ending at decision time",
+            "weekly": f"last {config.HTF_MONTHS} months of completed weekly candles; current week excluded",
+            "daily": f"last {config.MACRO_MONTHS} month of completed daily candles; current day excluded",
+            "intraday": f"last {config.MICRO_DAYS} trading sessions of completed {timeframe_label} candles ending at decision time",
         },
+        "context_contract": context_contract,
         "context_row_counts": {
             "intraday": len(micro),
             "daily": len(macro),
@@ -215,6 +232,21 @@ def format_market_state_for_prompt(package: Dict[str, Any]) -> str:
         lines.append(f"  Weekly: {windows.get('weekly')} ({counts.get('weekly', 0)} candles)")
         lines.append(f"  Daily: {windows.get('daily')} ({counts.get('daily', 0)} candles)")
         lines.append(f"  Intraday: {windows.get('intraday')} ({counts.get('intraday', 0)} candles)")
+    contract = package.get("context_contract")
+    if contract:
+        lines.append("Context contract:")
+        lines.append(
+            f"  Weekly complete_only={contract['weekly']['complete_only']} "
+            f"rows={contract['weekly']['completed_rows']} partial_rows={contract['weekly']['partial_rows']}"
+        )
+        lines.append(
+            f"  Daily complete_only={contract['daily']['complete_only']} "
+            f"rows={contract['daily']['completed_rows']} partial_rows={contract['daily']['partial_rows']}"
+        )
+        lines.append(
+            f"  Intraday complete_only={contract['intraday']['complete_only']} "
+            f"sessions={contract['intraday']['sessions']} rows={contract['intraday']['completed_rows']}"
+        )
     lines.append("=" * 60)
 
     # Latest candle

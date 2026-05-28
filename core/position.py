@@ -5,6 +5,7 @@ and manages signal cooldown to avoid spam.
 """
 import json
 import time
+import uuid
 from typing import Optional, Dict, Any
 
 from config import config
@@ -87,6 +88,7 @@ class PositionTracker:
                       entry_time: str) -> Dict:
         """Record a new position."""
         pos = {
+            "position_id": f"pos_{uuid.uuid4().hex[:12]}",
             "active": True,
             "direction": direction,
             "entry_price": entry_price,

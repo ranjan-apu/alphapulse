@@ -55,6 +55,19 @@ CREATE TABLE IF NOT EXISTS data_snapshots (
 -- ============================================================
 -- Experiment runs
 -- ============================================================
+CREATE TABLE IF NOT EXISTS runs (
+    run_id              TEXT PRIMARY KEY,
+    mode                TEXT NOT NULL DEFAULT 'backtest',
+    symbol              TEXT NOT NULL,
+    instrument_type     TEXT NOT NULL DEFAULT 'equity_cash',
+    product_type        TEXT NOT NULL DEFAULT 'CNC',
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    status              TEXT DEFAULT 'running',
+    config_snapshot     JSONB,
+    notes               TEXT
+);
+
 CREATE TABLE IF NOT EXISTS experiment_runs (
     run_id              TEXT PRIMARY KEY,
     data_snapshot_set_id TEXT REFERENCES data_snapshot_sets(set_id),

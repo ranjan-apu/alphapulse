@@ -283,8 +283,10 @@ class LevelLifecycleManager:
                     self._candles_since_test[level_id] = 0
                 
                 candles_no_reaction = self._candles_since_test.get(level_id, 0)
-                # Three consecutive candles with no reaction
-                if candles_no_reaction >= 3:
+                # More than three consecutive candles with no reaction.
+                # The first far candle often occurs before a level is relevant
+                # to the current auction; invalidate once the neglect persists.
+                if candles_no_reaction > 3:
                     level.state = LevelState.INVALIDATED
                     events.append(SessionEvent(
                         event_id=f"evt_{level_id}_invalidated_{int(candle_time.timestamp())}",
