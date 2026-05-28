@@ -306,6 +306,36 @@ def build_system_prompt() -> str:
     return BASE_SYSTEM_PROMPT + "\n" + mode_prompt
 
 
+def build_system_prompt_from_manager(prompt_name: str = None) -> str:
+    """
+    Build system prompt using PromptManager if available.
+    Falls back to legacy build_system_prompt() if prompt_name is None.
+    
+    Args:
+        prompt_name: One of 'dart-v1', 'pa-checklist-v2', 'strict-minimal-v3', etc.
+    
+    Returns:
+        System prompt string
+    """
+    if prompt_name is None:
+        return build_system_prompt()
+    
+    try:
+        from agent.prompt_manager import PromptManager, build_default_variants
+        pm = PromptManager()
+        defaults = build_default_variants()
+        for name, variant in defaults.items():
+            pm.register_variant(variant)
+        
+        variant = pm.get(prompt_name)
+        if variant:
+            return variant.system_template
+    except ImportError:
+        pass
+    
+    return build_system_prompt()
+
+
 def build_user_prompt(
     market_state_text: str,
     tool_descriptions: str,
@@ -336,6 +366,57 @@ def build_user_prompt(
     sections.append("Follow the Price-Action Workflow (A through H) and output your tool request or final signal.")
 
     return "\n\n".join(sections)
+
+
+def build_prompts_from_manager(
+    prompt_name: str,
+    market_state_text: str,
+    tool_descriptions: str,
+    portfolio_summary: str = "",
+    session_summary: str = "",
+    memory_summary: str = "",
+) -> tuple:
+    """
+    Build both system and user prompts using PromptManager.
+    Returns (system_prompt: str, user_prompt: str).
+    
+    Falls back to legacy build_* functions if prompt_name is None or manager unavailable.
+    """
+    if prompt_name is None:
+        return build_system_prompt(), build_user_prompt(
+            market_state_text, tool_descriptions,
+            portfolio_summary, session_summary, memory_summary
+        )
+    
+    try:
+        from agent.prompt_manager import PromptManager, build_default_variants
+        pm = PromptManager()
+        defaults = build_default_variants()
+        for name, variant in defaults.items():
+            pm.register_variant(variant)
+        
+        variant = pm.get(prompt_name)
+        if variant:
+            user = variant.user_template
+            template_vars = {
+                "market_state_text": market_state_text,
+                "tool_descriptions": tool_descriptions,
+                "portfolio_summary": portfolio_summary,
+                "session_summary": session_summary,
+                "memory_summary": memory_summary,
+            }
+            for key, value in template_vars.items():
+                placeholder = "{" + key + "}"
+                if placeholder in user:
+                    user = user.replace(placeholder, str(value))
+            return variant.system_template, user
+    except ImportError:
+        pass
+    
+    return build_system_prompt(), build_user_prompt(
+        market_state_text, tool_descriptions,
+        portfolio_summary, session_summary, memory_summary
+    )
 
 
 TOOL_RESULT_PROMPT = """
