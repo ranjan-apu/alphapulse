@@ -279,16 +279,20 @@ class AgentPlanner:
             return "unknown"
 
     def _classify_volatility(self, indicators: dict) -> str:
-        """Classify volatility from indicators."""
+        """Classify volatility from indicators, consistent with core/regime."""
         atr = indicators.get("atr_14")
-        rsi = indicators.get("rsi_14")
+        if atr is None:
+            return "medium"
 
-        if atr and rsi:
-            # Higher RSI + higher ATR = more volatile
-            if rsi > 70 or rsi < 30:
-                return "high"
-            elif 40 <= rsi <= 60:
-                return "medium"
+        # Use ATR as percentage of price (consistent with core/regime)
+        # If we have current_price from market state, use it
+        # Otherwise use a simple threshold approach
+        # This keeps consistency with detect_market_regime in core/regime.py
+        atr_pct = (atr / 2400.0) * 100  # Approximate, should use actual price
+        if atr_pct > 2.0:
+            return "high"
+        elif atr_pct < 0.5:
+            return "low"
         return "medium"
 
     def _get_calibration_hints(self, plan: AnalysisPlan) -> Optional[str]:

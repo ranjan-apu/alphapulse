@@ -40,6 +40,7 @@ def get_completed_weekly_context(
     df_weekly: pd.DataFrame,
     T: datetime,
     months: int = 3,
+    include_partial: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, bool]:
     """
     Get completed weekly context ending before the current week.
@@ -48,9 +49,6 @@ def get_completed_weekly_context(
     - Weekly context only includes weeks that ended before the week containing T.
     - The current incomplete week is excluded unless include_partial = True.
     - Returns (completed_weekly, partial_current_week, has_partial).
-
-    A "week" is considered complete if its last candle's date is strictly before
-    the week containing T (using ISO week).
     """
     T = _ensure_tz(T)
     df = df_weekly[df_weekly.index <= T].copy()
@@ -62,8 +60,8 @@ def get_completed_weekly_context(
     current_monday = current_monday.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Completed weeks end before the current week's Monday
-    completed = df[df.index < pd.Timestamp(current_monday, tz=T.tzinfo)]
-    partial = df[df.index >= pd.Timestamp(current_monday, tz=T.tzinfo)]
+    completed = df[df.index < pd.Timestamp(current_monday)]
+    partial = df[df.index >= pd.Timestamp(current_monday)]
 
     # Apply lookback
     cutoff = pd.Timestamp(T) - pd.DateOffset(months=months)
@@ -152,7 +150,7 @@ def build_context_contract(
         policy = ContextWindowPolicy()
 
     weekly_completed, weekly_partial, has_partial_week = get_completed_weekly_context(
-        df_weekly, T, policy.weekly_months
+        df_weekly, T, policy.weekly_months, include_partial=policy.include_partial_weekly
     )
     daily_completed, daily_partial, has_partial_day = get_completed_daily_context(
         df_daily, T, policy.daily_months

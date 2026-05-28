@@ -76,7 +76,7 @@ def detect_market_structure(
     structure = _classify_structure(swings, highs, lows)
 
     # Detect BOS and CHOCH
-    structure.recent_bos = _detect_bos(swings, closes)
+    structure.recent_bos = _detect_bos(swings, closes, structure.trend_structure)
     structure.recent_choch = _detect_choch(swings, closes)
 
     # Range analysis
@@ -196,8 +196,18 @@ def _classify_structure(
     return structure
 
 
-def _detect_bos(swings: List[SwingPoint], closes: np.ndarray) -> Optional[Dict]:
-    """Detect most recent Break of Structure."""
+def _detect_bos(
+    swings: List[SwingPoint],
+    closes: np.ndarray,
+    trend_structure: str = "unclear",
+) -> Optional[Dict]:
+    """
+    Detect most recent Break of Structure.
+    
+    A BOS must be in the trend direction:
+    - Bullish trend (HH_HL): BOS occurs when price breaks above last swing HIGH
+    - Bearish trend (LH_LL): BOS occurs when price breaks below last swing LOW
+    """
     if len(swings) < 3:
         return None
 
@@ -205,25 +215,29 @@ def _detect_bos(swings: List[SwingPoint], closes: np.ndarray) -> Optional[Dict]:
     recent_swings = swings[-3:]
     last_close = float(closes[-1]) if len(closes) > 0 else 0
 
-    # Check for bullish BOS: price breaks above last swing high
     swing_highs = [s for s in recent_swings if s.swing_type == "high"]
-    if swing_highs and last_close > swing_highs[-1].price:
-        return {
-            "type": "bullish_bos",
-            "broken_level": swing_highs[-1].price,
-            "broken_at": swing_highs[-1].timestamp,
-            "current_price": last_close,
-        }
-
-    # Check for bearish BOS: price breaks below last swing low
     swing_lows = [s for s in recent_swings if s.swing_type == "low"]
+
+    # Bullish BOS: price breaks above last swing high (in trend direction)
+    if swing_highs and last_close > swing_highs[-1].price:
+        # Only valid in bullish trend or unclear
+        if trend_structure in ("HH_HL", "unclear", ""):
+            return {
+                "type": "bullish_bos",
+                "broken_level": swing_highs[-1].price,
+                "broken_at": swing_highs[-1].timestamp,
+                "current_price": last_close,
+            }
+
+    # Bearish BOS: price breaks below last swing low (in trend direction)
     if swing_lows and last_close < swing_lows[-1].price:
-        return {
-            "type": "bearish_bos",
-            "broken_level": swing_lows[-1].price,
-            "broken_at": swing_lows[-1].timestamp,
-            "current_price": last_close,
-        }
+        if trend_structure in ("LH_LL", "unclear", ""):
+            return {
+                "type": "bearish_bos",
+                "broken_level": swing_lows[-1].price,
+                "broken_at": swing_lows[-1].timestamp,
+                "current_price": last_close,
+            }
 
     return None
 

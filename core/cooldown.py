@@ -167,48 +167,33 @@ class CooldownController:
 
         return True, None
 
-    def record_loss(self, direction: str, level_zone: Optional[str] = None):
-        """Record a losing trade."""
+    def record_loss(self, run_id: str = "", symbol: str = "", direction: str = "", level_zone: Optional[str] = None):
+        """Record a losing trade and add cooldown lock."""
         self._same_direction_losses[direction] = self._same_direction_losses.get(direction, 0) + 1
         self._trades_today += 1
 
         # Auto-add lock after stop loss
         if self.config.cooldown_after_stop_candles > 0:
-            import uuid
-            lock = TradeLock(
-                lock_id=f"lock_{uuid.uuid4().hex[:12]}",
-                run_id="",
-                symbol="",
+            self.add_lock(
+                run_id, symbol,
+                CooldownReason.AFTER_STOP_LOSS,
                 direction=direction,
                 level_zone=level_zone,
-                reason=CooldownReason.AFTER_STOP_LOSS,
-                expires_at=_ist_now() + timedelta(
-                    minutes=self.config.cooldown_after_stop_candles * self.config.decision_interval_minutes
-                ),
             )
-            self._locks.append(lock)
 
-    def record_win(self, direction: str = None):
-        """Record a winning trade."""
+    def record_win(self, run_id: str = "", symbol: str = "", direction: str = ""):
+        """Record a winning trade and add optional shorter cooldown."""
         self._trades_today += 1
 
         # Optional shorter cooldown after target hit
         if self.config.cooldown_after_target_candles > 0:
-            import uuid
-            lock = TradeLock(
-                lock_id=f"lock_{uuid.uuid4().hex[:12]}",
-                run_id="",
-                symbol="",
+            self.add_lock(
+                run_id, symbol,
+                CooldownReason.AFTER_TARGET_HIT,
                 direction=direction,
-                level_zone=None,
-                reason=CooldownReason.AFTER_TARGET_HIT,
-                expires_at=_ist_now() + timedelta(
-                    minutes=self.config.cooldown_after_target_candles * self.config.decision_interval_minutes
-                ),
             )
-            self._locks.append(lock)
 
-    def record_exit(self, direction: str = None):
+    def record_exit(self, run_id: str = "", symbol: str = "", direction: str = ""):
         """Record an agent-initiated exit (thesis failure)."""
         self._trades_today += 1
 

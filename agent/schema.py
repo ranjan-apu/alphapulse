@@ -48,14 +48,13 @@ class DartThesis(BaseModel):
     risk: str = Field(description="Invalidation level, stop distance, target distance")
     trigger: str = Field(description="The lower-timeframe confirmation for entry")
 
-    @model_validator(mode="after")
-    def check_not_default(self):
+    def is_complete(self) -> bool:
+        """Check if all DART components are filled with meaningful values."""
         for field_name in ("direction", "area", "risk", "trigger"):
             value = getattr(self, field_name)
             if not value or value.lower() in ("unclear", "", "none", "n/a"):
-                # Allow empty for SKIP/HOLD, but not BUY/SELL
-                pass
-        return self
+                return False
+        return True
 
 
 # ---- Price Action Checklist ----
@@ -142,6 +141,8 @@ class FinalSignal(BaseModel):
                 raise ValueError("BUY signal requires expected_horizon_minutes")
             if self.invalidation is None:
                 raise ValueError("BUY signal requires invalidation")
+            if not self.dart.is_complete():
+                raise ValueError("BUY signal requires complete DART thesis (no empty/unclear fields)")
 
         elif action == "SELL":
             if self.entry is None or self.stop is None or self.target is None:
@@ -152,6 +153,8 @@ class FinalSignal(BaseModel):
                 raise ValueError("SELL signal requires expected_horizon_minutes")
             if self.invalidation is None:
                 raise ValueError("SELL signal requires invalidation")
+            if not self.dart.is_complete():
+                raise ValueError("SELL signal requires complete DART thesis (no empty/unclear fields)")
 
         elif action == "SKIP":
             if not self.reason:

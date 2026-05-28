@@ -155,10 +155,10 @@ class OrderSimulator:
         run_id: str,
         position_id: str,
         symbol: str,
-        direction: str,
+        direction: str,  # Position direction ('BUY' or 'SELL'), NOT the exit side
         exit_price: float,
         quantity: int,
-        order_type: str = "EXIT",  # EXIT, STOP_LOSS, TARGET, FORCED_SQUAREOFF
+        order_type: str = "EXIT",
         product_type: str = "CNC",
     ) -> Dict:
         """

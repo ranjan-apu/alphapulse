@@ -371,12 +371,9 @@ class MemoryStore:
                 tag_score = min(overlap / max(len(setup_tags), 1), 1.0)
                 score += 0.10 * tag_score
 
-            # Apply recency decay
+            # Apply recency decay (but NOT regime mismatch penalty here - that's already
+            # handled by scoring 0 for regime_match when regimes differ)
             score *= recency_weight
-
-            # Regime mismatch penalty for different regimes
-            if ep.market_regime != market_regime:
-                score *= self._regime_mismatch_penalty
 
             scored.append((ep, score))
 
@@ -430,6 +427,7 @@ class MemoryStore:
         self,
         symbol: str,
         analysis_plan: AnalysisPlan,
+        # Fallback values only used if analysis_plan fields are None
         market_regime: str = "unclear",
         session_type: str = "unclear",
         gap_type: str = "no_gap",
@@ -445,22 +443,22 @@ class MemoryStore:
         Build a retrieval query from analysis plan and market state.
         Called after analysis plan is produced and before tool execution.
 
-        Returns: dict suitable for retrieve_similar_setups.
+        AnalysisPlan fields take priority; fallback params are used when plan fields are None.
         """
         return {
             "symbol": symbol,
-            "market_regime": market_regime,
-            "session_type": session_type,
-            "gap_type": gap_type,
-            "structure_state": structure_state,
-            "vwap_relation": vwap_relation,
-            "vwap_distance_atr": vwap_distance_atr,
-            "profile_location": profile_location,
-            "price_location": price_location,
-            "time_bucket": time_bucket,
-            "volatility_bucket": volatility_bucket,
+            "market_regime": analysis_plan.market_regime or market_regime,
+            "session_type": analysis_plan.session_type or session_type,
+            "gap_type": analysis_plan.gap_type or gap_type,
+            "structure_state": analysis_plan.structure_state or structure_state,
+            "vwap_relation": analysis_plan.vwap_relation or vwap_relation,
+            "vwap_distance_atr": analysis_plan.vwap_distance_atr or vwap_distance_atr,
+            "profile_location": analysis_plan.profile_location or profile_location,
+            "price_location": analysis_plan.price_location or price_location,
+            "time_bucket": analysis_plan.time_bucket or time_bucket,
+            "volatility_bucket": analysis_plan.volatility_bucket or volatility_bucket,
             "setup_tags": analysis_plan.setup_tags,
             "direction": analysis_plan.direction_bias
-            if analysis_plan.direction_bias != "neutral"
+            if analysis_plan.direction_bias not in ("neutral", None)
             else None,
         }

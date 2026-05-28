@@ -20,11 +20,11 @@ class VolumeProfileResult:
     poc: float                  # Point of Control (highest volume price)
     vah: Optional[float]        # Value Area High
     val: Optional[float]        # Value Area Low
-    value_area_pct: float = 0.70  # Percentage of volume in value area
     hvn_levels: List[float] = None   # High Volume Nodes
     lvn_levels: List[float] = None   # Low Volume Nodes
     price_location: str = "no_data"  # 'inside_value', 'above_vah', 'below_val'
     profile_type: str = "unclear"    # 'normal', 'double_distribution', 'trending'
+    value_area_pct_used: float = 0.70  # The value area % used in computation
 
     def __post_init__(self):
         if self.hvn_levels is None:
@@ -156,7 +156,7 @@ def compute_volume_profile(
         poc=round(poc, 2),
         vah=round(vah, 2) if vah else None,
         val=round(val, 2) if val else None,
-        value_area_pct=value_area_pct,
+        value_area_pct_used=value_area_pct,
         hvn_levels=hvn_levels[:5] if hvn_levels else [],
         lvn_levels=lvn_levels[:5] if lvn_levels else [],
         price_location=price_location,
@@ -196,7 +196,7 @@ def volume_profile_to_dict(result: VolumeProfileResult) -> dict:
         "poc": result.poc,
         "vah": result.vah,
         "val": result.val,
-        "value_area_pct": result.value_area_pct,
+        "value_area_pct_used": result.value_area_pct_used,
         "hvn_levels": result.hvn_levels,
         "lvn_levels": result.lvn_levels,
         "price_location": result.price_location,
