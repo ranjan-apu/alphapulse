@@ -282,6 +282,7 @@ You are in STRICT mode. This means:
 - Output BUY only when DART is fully complete AND all checklist scores meet thresholds.
 - If any DART component is missing or the risk math doesn't clear the validator, output SKIP (flat) or HOLD (in position).
 - The deterministic validator will reject trades that don't meet 2:1 net R:R or capital constraints.
+- Use calculate_trade_math tool before finalizing any BUY levels.
 - Err on the side of SKIP. Missing a trade is better than taking a bad one.
 """
 
@@ -292,8 +293,8 @@ EXPLORATORY_MODE_PROMPT = """
 You are in EXPLORATORY mode. This means:
 - The goal is to generate testable candidate trades so the harness can measure signal quality.
 - You should still SKIP for obvious chop, contradictory context, or no directional edge.
-- If direction, area, and trigger are reasonable but exact levels are not obvious, request estimate_risk with the likely direction and current/nearby entry.
-- If estimate_risk returns a coherent stop/target, request calculate_trade_math.
+- If direction, area, and trigger are reasonable but exact levels are not obvious, request compute_session_vwap or detect_market_structure first, then calculate_trade_math.
+- If the tools return coherent stop/target levels, request calculate_trade_math.
 - You may output BUY when the setup is testable even if confidence is modest; the deterministic validator will accept or reject it.
 - Prefer fewer but real candidate trades over permanent SKIP.
 """

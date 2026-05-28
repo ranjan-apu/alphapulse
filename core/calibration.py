@@ -189,7 +189,8 @@ class CalibrationTracker:
         """
         if action in ("SKIP",):
             self.total_skips += 1
-            if outcome.get("skip_quality") == "missed_long_opportunity":
+            skip_quality = outcome.get("skip_quality", "")
+            if skip_quality in ("missed_long_opportunity", "missed_short_opportunity"):
                 self.missed_opportunities += 1
             return
 

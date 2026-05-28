@@ -278,17 +278,18 @@ class AgentPlanner:
         except Exception:
             return "unknown"
 
-    def _classify_volatility(self, indicators: dict) -> str:
+    def _classify_volatility(self, indicators: dict, current_price: float = None) -> str:
         """Classify volatility from indicators, consistent with core/regime."""
         atr = indicators.get("atr_14")
         if atr is None:
             return "medium"
 
-        # Use ATR as percentage of price (consistent with core/regime)
-        # If we have current_price from market state, use it
-        # Otherwise use a simple threshold approach
-        # This keeps consistency with detect_market_regime in core/regime.py
-        atr_pct = (atr / 2400.0) * 100  # Approximate, should use actual price
+        # Use ATR as percentage of current price (consistent with core/regime)
+        if current_price and current_price > 0:
+            atr_pct = (atr / current_price) * 100
+        else:
+            # Fallback: assume ~2400 for large-cap Indian equities
+            atr_pct = (atr / 2400.0) * 100
         if atr_pct > 2.0:
             return "high"
         elif atr_pct < 0.5:
