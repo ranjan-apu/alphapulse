@@ -136,6 +136,7 @@ class Config:
 
     # Postgres & Replay Defaults
     STATE_BACKEND: str = os.getenv("STATE_BACKEND", "postgres")
+    RUNTIME_SCHEMA: str = os.getenv("PG_SCHEMA", "historical")
     AGENT_WORKFLOW: str = os.getenv("AGENT_WORKFLOW", "direct")
     PRODUCT_TYPE: str = os.getenv("PRODUCT_TYPE", "CNC")
     INSTRUMENT_TYPE: str = os.getenv("INSTRUMENT_TYPE", "equity_cash")

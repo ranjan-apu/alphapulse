@@ -239,18 +239,30 @@ class ReplayRunner:
             root_span = self.tracer.create_root_span(
                 name=trace_name,
                 input_data={
+                    "run_id": self.run_id,
                     "step": step_count,
                     "decision_time": str(T),
                     "instrument": config.SYMBOL,
                     "current_price": float(decision_point['candle_T']['close']),
                     "context_delivery_mode": self._context_delivery_mode.value,
+                    "has_open_position": has_pos,
                 },
                 metadata={
+                    "run_id": self.run_id,
                     "step": step_count,
                     "decision_time": str(T),
                     "instrument": config.SYMBOL,
                     "context_delivery_mode": self._context_delivery_mode.value,
+                    "decision_interval": config.DECISION_INTERVAL,
+                    "llm_provider": config.LLM_PROVIDER,
+                    "llm_model": config.MODEL_NAME,
+                    "agent_workflow": config.AGENT_WORKFLOW,
+                    "decision_mode": config.DECISION_MODE,
+                    "state_backend": config.STATE_BACKEND,
+                    "runtime_schema": config.RUNTIME_SCHEMA,
                 },
+                session_id=self.run_id,
+                tags=["historical-replay", config.SYMBOL, config.DECISION_MODE],
             )
 
             # ---- Build Market State Package ----
@@ -273,6 +285,11 @@ class ReplayRunner:
                     symbol=config.SYMBOL,
                 )
                 print(f"\n  [Error building market state: {e}] - skipping")
+                self.tracer.end_root_span(
+                    root_span,
+                    output_data={"status": "error", "error": str(e)},
+                    metadata={"error_type": "MARKET_STATE_FAILURE"},
+                )
                 continue
 
             # ---- Charts ----
@@ -412,7 +429,7 @@ class ReplayRunner:
             )
 
             # ---- Langfuse tracing ----
-            self._trace_to_langfuse(root_span, agent_result, signal, market_state_text, validation_result)
+            self._trace_to_langfuse(root_span, dec_id, agent_result, signal, market_state_text, validation_result)
 
             # ---- Redis caching ----
             if self.redis_avail and self.redis_client:
@@ -725,6 +742,7 @@ class ReplayRunner:
     def _trace_to_langfuse(
         self,
         root_span,
+        decision_id: str,
         agent_result: Dict,
         signal: Dict,
         market_state_text: str,
@@ -751,6 +769,9 @@ class ReplayRunner:
                 metadata={
                     "call_number": i + 1,
                     "total_calls": len(agent_result.get("raw_responses", [])),
+                    "run_id": self.run_id,
+                    "decision_id": decision_id,
+                    "symbol": config.SYMBOL,
                 },
             )
 
@@ -760,7 +781,13 @@ class ReplayRunner:
                 name=f"tool_{tc['tool']}",
                 input_data={"tool": tc["tool"], "arguments": tc.get("arguments")},
                 output_data=tc.get("result"),
-                metadata={"reason": tc.get("reason", "")},
+                metadata={
+                    "reason": tc.get("reason", ""),
+                    "run_id": self.run_id,
+                    "decision_id": decision_id,
+                    "round": tc.get("round"),
+                    "latency_ms": tc.get("latency_ms"),
+                },
             )
 
         self.tracer.add_span(
@@ -777,15 +804,26 @@ class ReplayRunner:
                 "action": validation_result.get("action"),
                 "rejection_reason": validation_result.get("rejection_reason"),
             },
+            metadata={
+                "run_id": self.run_id,
+                "decision_id": decision_id,
+                "symbol": config.SYMBOL,
+            },
         )
 
         self.tracer.end_root_span(
             root_span,
             output_data={
+                "decision_id": decision_id,
                 "action": validation_result.get("action", signal.get("action")),
                 "confidence": signal.get("confidence"),
                 "is_valid": validation_result.get("is_valid"),
                 "tool_calls_made": len(agent_result.get("tool_calls", [])),
+            },
+            metadata={
+                "run_id": self.run_id,
+                "decision_id": decision_id,
+                "status": "success",
             },
         )
 
