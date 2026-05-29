@@ -146,6 +146,10 @@ class Config:
     MAX_TRADES_PER_DAY: int = int(os.getenv("MAX_TRADES_PER_DAY", "5"))
     JSONL_AUDIT_ENABLED: bool = os.getenv("JSONL_AUDIT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
+    # Version tracking for reproducibility
+    AGENT_PROMPT_VERSION: str = os.getenv("AGENT_PROMPT_VERSION", "pa-checklist-v2")
+    AGENT_TOOLSET_VERSION: str = os.getenv("AGENT_TOOLSET_VERSION", "structure-vwap-profile-v1")
+
 
     @classmethod
     def ensure_dirs(cls):

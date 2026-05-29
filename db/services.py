@@ -3,6 +3,7 @@ Services coordinating business operations and repository logic.
 """
 import uuid
 import json
+import hashlib
 import logging
 from dataclasses import asdict
 from datetime import datetime, date, timezone, time
@@ -49,6 +50,9 @@ class RunBootstrapService:
 
             logger.info(f"Creating new run: {run_id}")
             # Insert to experiment_runs
+            prompt_version = getattr(config, "AGENT_PROMPT_VERSION", "pa-checklist-v1")
+            toolset_version = getattr(config, "AGENT_TOOLSET_VERSION", "structure-vwap-profile-v1")
+
             run_data = {
                 "run_id": run_id,
                 "symbol": symbol,
@@ -64,8 +68,9 @@ class RunBootstrapService:
                 "max_daily_loss": max_daily_loss,
                 "max_trades_per_day": max_trades_per_day,
                 "agent_version": "dart-pa-v2",
-                "prompt_version": "pa-checklist-v1",
-                "toolset_version": "structure-vwap-profile-v1",
+                "prompt_version": prompt_version,
+                "toolset_version": toolset_version,
+                "model_name": config.MODEL_NAME,
                 "status": "running",
                 "notes": notes,
                 "config_snapshot": {
@@ -432,12 +437,40 @@ class DecisionTransactionService:
             checklist = signal.get("checklist", {})
             dart = signal.get("dart", {})
             
+            # Prefer the runner-provided market context hash; fall back to a
+            # deterministic signal hash for older callers.
+            context_data_hash = signal.get("_context_data_hash")
+            if not context_data_hash:
+                hash_input = f"{run_id}:{T}:{signal.get('action')}:{signal.get('entry')}:{signal.get('stop')}:{signal.get('target')}:{signal.get('confidence')}"
+                context_data_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+            # Get run metadata for reproducibility fields
+            run_meta = uow.runs.get_experiment_run(run_id)
+            run_model_name = run_meta.get("model_name") if run_meta else None
+            run_prompt_version = run_meta.get("prompt_version") if run_meta else None
+            run_toolset_version = run_meta.get("toolset_version") if run_meta else None
+            run_snapshot_set_id = run_meta.get("data_snapshot_set_id") if run_meta else None
+
+            validation_outcome = None
+            if rejection_reason:
+                validation_outcome = rejection_reason
+            elif is_valid:
+                validation_outcome = "accepted"
+            else:
+                validation_outcome = "unknown_rejection"
+
             decision_data = {
                 "decision_id": decision_id,
                 "run_id": run_id,
                 "symbol": symbol,
                 "decision_time": T,
                 "current_price": current_price,
+                "context_data_hash": context_data_hash,
+                "prompt_version": run_prompt_version or config.AGENT_PROMPT_VERSION,
+                "model_name": run_model_name or config.MODEL_NAME,
+                "toolset_version": run_toolset_version or config.AGENT_TOOLSET_VERSION,
+                "snapshot_set_id": run_snapshot_set_id,
+                "validation_outcome": validation_outcome,
                 "portfolio_snapshot_before": portfolio["snapshot_id"],
                 "portfolio_snapshot_after": after_snap_id,
                 "raw_action": signal.get("action"),
@@ -464,7 +497,8 @@ class DecisionTransactionService:
                 "tool_calls_json": signal.get("tool_calls", []),
                 "memory_references": signal.get("memory_references", []),
                 "reflection_ids": signal.get("reflection_ids", []),
-                "agent_version": "dart-pa-v2"
+                "agent_version": "dart-pa-v2",
+                "raw_llm_responses": signal.get("_raw_llm_responses", []),
             }
 
             # TOPOLOGICAL INSERTIONS TO AVOID FOREIGN KEY ISSUES
@@ -945,4 +979,120 @@ class SessionStateService:
                         "state": level.state.value,
                         "updated_at": datetime.now(timezone.utc)
                     })
+
+
+class AuditService:
+    """Persist engine audit events, tool traces, turn records, and trade events to Postgres."""
+
+    @staticmethod
+    def record_audit_event(
+        run_id: Optional[str],
+        event_type: str,
+        message: str,
+        severity: str = "info",
+        decision_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        event_id = f"aud_{uuid.uuid4().hex[:12]}"
+        with UnitOfWork() as uow:
+            uow.audit.save_event({
+                "event_id": event_id,
+                "run_id": run_id or None,
+                "decision_id": decision_id or None,
+                "event_type": event_type,
+                "severity": severity,
+                "symbol": symbol,
+                "message": message,
+                "details": details or {},
+            })
+        return event_id
+
+    @staticmethod
+    def record_agent_turn(
+        run_id: str,
+        decision_id: str,
+        turn_number: int,
+        role: str,
+        raw_output: str,
+        parsed_type: Optional[str] = None,
+        schema_valid: bool = True,
+        schema_errors: Optional[List[str]] = None,
+    ) -> str:
+        turn_id = f"turn_{uuid.uuid4().hex[:12]}"
+        with UnitOfWork() as uow:
+            uow.agent_turns.save_turn({
+                "turn_id": turn_id,
+                "run_id": run_id,
+                "decision_id": decision_id or None,
+                "turn_number": turn_number,
+                "role": role,
+                "raw_output": raw_output,
+                "parsed_type": parsed_type,
+                "schema_valid": schema_valid,
+                "schema_errors": schema_errors or [],
+            })
+        return turn_id
+
+    @staticmethod
+    def record_tool_trace(
+        run_id: str,
+        decision_id: str,
+        turn_id: Optional[str],
+        round_num: int,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        result: Dict[str, Any],
+        status: str = "success",
+        error_message: Optional[str] = None,
+        latency_ms: Optional[float] = None,
+    ) -> str:
+        trace_id = f"trc_{uuid.uuid4().hex[:12]}"
+        with UnitOfWork() as uow:
+            uow.tool_traces.save_trace({
+                "trace_id": trace_id,
+                "run_id": run_id,
+                "decision_id": decision_id or None,
+                "turn_id": turn_id or None,
+                "round_num": round_num,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "result": result,
+                "status": status,
+                "error_message": error_message,
+                "latency_ms": latency_ms,
+            })
+        return trace_id
+
+    @staticmethod
+    def record_trade_event(
+        run_id: str,
+        symbol: str,
+        event_type: str,
+        decision_id: Optional[str] = None,
+        position_id: Optional[str] = None,
+        direction: Optional[str] = None,
+        price: Optional[float] = None,
+        quantity: Optional[int] = None,
+        pnl: Optional[float] = None,
+        reason: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        event_id = f"tev_{uuid.uuid4().hex[:12]}"
+        with UnitOfWork() as uow:
+            uow.trade_events.save_event({
+                "event_id": event_id,
+                "run_id": run_id,
+                "decision_id": decision_id or None,
+                "position_id": position_id or None,
+                "event_type": event_type,
+                "symbol": symbol,
+                "direction": direction,
+                "price": price,
+                "quantity": quantity,
+                "pnl": pnl,
+                "reason": reason,
+                "details": details or {},
+            })
+        return event_id
             

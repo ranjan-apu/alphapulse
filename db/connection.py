@@ -58,3 +58,13 @@ def test_connection() -> bool:
                 return True
     except Exception:
         return False
+
+
+def ensure_connection_or_exit() -> None:
+    """Test database connectivity and exit with error if unavailable."""
+    import sys
+    if not test_connection():
+        print("\n  FATAL: Postgres is not available.")
+        print("  Run: docker-compose up -d")
+        print("  Or check PG_HOST/PG_PORT/PG_DATABASE/PG_USER/PG_PASSWORD settings.")
+        sys.exit(1)

@@ -311,3 +311,85 @@ class TradeLockRepository(BaseRepository):
         rows = self.cursor.fetchall()
         columns = [desc[0] for desc in self.cursor.description]
         return [dict(zip(columns, row)) for row in rows]
+
+
+class AgentTurnRepository(BaseRepository):
+    def save_turn(self, data: Dict[str, Any]) -> None:
+        self._insert("agent_turn_records", data)
+
+    def get_turns_for_decision(self, decision_id: str) -> List[Dict[str, Any]]:
+        self.cursor.execute(
+            "SELECT * FROM agent_turn_records WHERE decision_id = %s ORDER BY turn_number ASC",
+            (decision_id,)
+        )
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        res = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            for k in ("schema_errors",):
+                if d.get(k) and isinstance(d[k], str):
+                    d[k] = json.loads(d[k])
+            res.append(d)
+        return res
+
+
+class ToolTraceRepository(BaseRepository):
+    def save_trace(self, data: Dict[str, Any]) -> None:
+        self._insert("tool_call_traces", data)
+
+    def get_traces_for_decision(self, decision_id: str) -> List[Dict[str, Any]]:
+        self.cursor.execute(
+            "SELECT * FROM tool_call_traces WHERE decision_id = %s ORDER BY round_num ASC",
+            (decision_id,)
+        )
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        res = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            for k in ("arguments", "result"):
+                if d.get(k) and isinstance(d[k], str):
+                    d[k] = json.loads(d[k])
+            res.append(d)
+        return res
+
+
+class AuditEventRepository(BaseRepository):
+    def save_event(self, data: Dict[str, Any]) -> None:
+        self._insert("audit_events", data)
+
+    def get_events_for_run(self, run_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        self.cursor.execute(
+            "SELECT * FROM audit_events WHERE run_id = %s ORDER BY created_at DESC LIMIT %s",
+            (run_id, limit)
+        )
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        res = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if d.get("details") and isinstance(d["details"], str):
+                d["details"] = json.loads(d["details"])
+            res.append(d)
+        return res
+
+
+class TradeEventRepository(BaseRepository):
+    def save_event(self, data: Dict[str, Any]) -> None:
+        self._insert("trade_events", data)
+
+    def get_events_for_run(self, run_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        self.cursor.execute(
+            "SELECT * FROM trade_events WHERE run_id = %s ORDER BY created_at ASC LIMIT %s",
+            (run_id, limit)
+        )
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        res = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if d.get("details") and isinstance(d["details"], str):
+                d["details"] = json.loads(d["details"])
+            res.append(d)
+        return res
