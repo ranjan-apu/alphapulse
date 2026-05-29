@@ -3,50 +3,53 @@ Postgres connection manager for AlphaPulse.
 Provides a singleton connection pool and context manager for transactions.
 """
 import os
-import threading
+import re
+import time
 from contextlib import contextmanager
-from typing import Optional
 
 import psycopg2
-import psycopg2.pool
 
 
-_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
-_pool_lock = threading.Lock()
+def _runtime_schema() -> str:
+    schema = os.getenv("PG_SCHEMA", "historical").strip() or "historical"
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
+        raise ValueError(f"Invalid PG_SCHEMA value: {schema!r}")
+    return schema
 
 
-def get_connection_pool() -> psycopg2.pool.ThreadedConnectionPool:
-    """Get or create the Postgres connection pool."""
-    global _pool
-
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                _pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=2,
-                    maxconn=10,
-                    host=os.getenv("PG_HOST", "localhost"),
-                    port=int(os.getenv("PG_PORT", "5433")),
-                    dbname=os.getenv("PG_DATABASE", "alphapulse"),
-                    user=os.getenv("PG_USER", "alphapulse"),
-                    password=os.getenv("PG_PASSWORD", "alphapulse"),
-                )
-    return _pool
+def _connect_with_retry() -> psycopg2.extensions.connection:
+    sslmode = os.getenv("PG_SSLMODE")
+    conn_kwargs = dict(
+        host=os.getenv("PG_HOST", "localhost"),
+        port=int(os.getenv("PG_PORT", "5433")),
+        dbname=os.getenv("PG_DATABASE", "alphapulse"),
+        user=os.getenv("PG_USER", "alphapulse"),
+        password=os.getenv("PG_PASSWORD", "alphapulse"),
+        connect_timeout=int(os.getenv("PG_CONNECT_TIMEOUT", "5")),
+        options=f"-c search_path={_runtime_schema()},public",
+    )
+    if sslmode:
+        conn_kwargs["sslmode"] = sslmode
+    last_error = None
+    for attempt in range(3):
+        try:
+            return psycopg2.connect(**conn_kwargs)
+        except psycopg2.OperationalError as exc:
+            last_error = exc
+            if attempt == 2:
+                raise
+            time.sleep(1)
+    raise last_error
 
 
 @contextmanager
 def get_connection():
-    """Get a pooled connection.
-
-    Transaction boundaries are owned by callers such as UnitOfWork. This
-    context manager only borrows and returns the connection.
-    """
-    pool = get_connection_pool()
-    conn = pool.getconn()
+    """Get a dedicated connection for the duration of the context."""
+    conn = _connect_with_retry()
     try:
         yield conn
     finally:
-        pool.putconn(conn)
+        conn.close()
 
 
 def test_connection() -> bool:
