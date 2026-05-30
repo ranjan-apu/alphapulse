@@ -7,6 +7,7 @@ import base64
 import json
 import mimetypes
 import re
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 
@@ -408,14 +409,17 @@ class DartAgent:
                 tool_args = parsed.get("arguments", {})
                 tool_reason = parsed.get("reason", "")
 
-                # Execute tool
+                # Execute tool with latency tracking
+                t_tool_start = time.time()
                 tool_result = harness.execute(tool_name, tool_args)
+                t_tool_elapsed = (time.time() - t_tool_start) * 1000
                 tool_log.append({
                     "round": round_num,
                     "tool": tool_name,
                     "arguments": tool_args,
                     "reason": tool_reason,
                     "result": tool_result,
+                    "latency_ms": round(t_tool_elapsed, 2),
                 })
 
                 # Format tool result for LLM

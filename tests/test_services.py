@@ -12,7 +12,8 @@ from db.services import (
     ReplayStateService,
     DecisionTransactionService,
     OutcomeFeedbackService,
-    SessionStateService
+    SessionStateService,
+    AuditService,
 )
 from db.unit_of_work import UnitOfWork
 from db.repository import OrderRepository
@@ -499,3 +500,55 @@ def test_decision_transaction_rolls_back_when_order_persistence_fails(monkeypatc
     assert order_count == 0
     assert position_count == 0
     assert decision_snapshot_count == 0
+
+
+def test_audit_rows_can_be_linked_to_persisted_decision():
+    symbol = "RELIANCE"
+    run_id = _seed_run(symbol)
+    T = datetime.now(timezone.utc)
+
+    _, decision_id = DecisionTransactionService.process_decision(
+        run_id, symbol, T, 2400.0, _buy_signal(), _buy_validation(quantity=3)
+    )
+
+    turn_id = AuditService.record_agent_turn(
+        run_id=run_id,
+        decision_id=decision_id,
+        turn_number=0,
+        role="assistant",
+        raw_output='{"type": "analysis_plan"}',
+        parsed_type="analysis_plan",
+    )
+    AuditService.record_tool_trace(
+        run_id=run_id,
+        decision_id=decision_id,
+        turn_id=turn_id,
+        round_num=1,
+        tool_name="get_portfolio_state",
+        arguments={},
+        result={"cash_available": 100000.0},
+    )
+    AuditService.record_audit_event(
+        run_id=run_id,
+        decision_id=decision_id,
+        event_type="TEST_AUDIT",
+        message="linked audit event",
+        symbol=symbol,
+    )
+    AuditService.record_trade_event(
+        run_id=run_id,
+        symbol=symbol,
+        decision_id=decision_id,
+        event_type="entry_requested",
+        direction="BUY",
+        price=2400.0,
+        quantity=3,
+    )
+
+    with UnitOfWork() as uow:
+        for table in ("agent_turn_records", "tool_call_traces", "audit_events", "trade_events"):
+            uow.cursor.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE decision_id = %s",
+                (decision_id,),
+            )
+            assert uow.cursor.fetchone()[0] == 1

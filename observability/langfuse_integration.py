@@ -9,7 +9,7 @@ Follows Langfuse best practices:
 - Langfuse imported AFTER environment variables are loaded
 """
 import os
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 from config import config
 
@@ -47,7 +47,14 @@ class LangfuseTracer:
             print(f"  [Langfuse] Tracing disabled. Continuing without observability.")
             self.enabled = False
 
-    def create_root_span(self, name: str, input_data: Any = None, metadata: Dict = None) -> Optional[Any]:
+    def create_root_span(
+        self,
+        name: str,
+        input_data: Any = None,
+        metadata: Dict = None,
+        session_id: str = None,
+        tags: list = None,
+    ) -> Optional[Any]:
         """
         Create a root span (effectively a trace).
         Returns a LangfuseSpan that can be used to create child spans.
@@ -61,6 +68,8 @@ class LangfuseTracer:
                 input=input_data,
                 metadata=metadata or {},
             )
+            if session_id or tags:
+                span.update_trace(session_id=session_id, tags=tags or [])
             return span
         except Exception as e:
             print(f"  [Langfuse] create_root_span error: {e}")
